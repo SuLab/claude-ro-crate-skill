@@ -1,0 +1,41 @@
+{
+  "actions": {
+    "python3 -c 'open('\"'\"'out.txt'\"'\"','\"'\"'w'\"'\"').write('\"'\"'ok\\n'\"'\"')' [cmd_000007]": {
+      "has_error": false,
+      "instrument": "#software/python3",
+      "object": [],
+      "result": [
+        "out.txt"
+      ],
+      "status": "http://schema.org/CompletedActionStatus",
+      "type": [
+        "CreateAction"
+      ]
+    }
+  },
+  "entity_types": {
+    "CreateAction": 1,
+    "CreativeWork": 3,
+    "Dataset": 1,
+    "File": 4,
+    "Person": 1,
+    "Profile": 1,
+    "PropertyValue": 1,
+    "SoftwareApplication": 5
+  },
+  "root_conformsTo": [
+    "https://w3id.org/ro/wfrun/process/0.5"
+  ],
+  "root_hasPart": [
+    "out.txt"
+  ],
+  "root_mainEntity": null,
+  "root_mentions_count": 2,
+  "stable_file_ids": [
+    ".ro-crate-run/commands/cmd_000007.json",
+    ".ro-crate-run/logs/cmd_000007.stderr.txt",
+    ".ro-crate-run/logs/cmd_000007.stdout.txt",
+    "out.txt"
+  ],
+  "validation_status": "warning"
+}

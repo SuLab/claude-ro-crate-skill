@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ro-crate-run-local",
+  "description": "Local marketplace for the ro-crate-run Claude Code plugin.",
+  "owner": {
+    "name": "alan",
+    "email": "ahuebschen@scripps.edu"
+  },
+  "plugins": [
+    {
+      "name": "ro-crate-run",
+      "description": "Capture, checkpoint, validate, and finalize RO-Crate provenance for Claude Code sessions.",
+      "category": "development",
+      "source": "."
+    }
+  ]
+}

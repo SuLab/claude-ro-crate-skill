@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_session_start.py"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_user_prompt.py"}]}],
+    "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_pre_tool_use.py"}]}],
+    "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_post_tool_use.py"}]}],
+    "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_post_tool_failure.py"}]}],
+    "PostToolBatch": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_post_tool_batch.py"}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_permission.py PermissionRequest"}]}],
+    "PermissionDenied": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_permission.py PermissionDenied"}]}],
+    "CwdChanged": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_cwd_changed.py"}]}],
+    "FileChanged": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_file_changed.py"}]}],
+    "WorktreeCreate": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_worktree.py WorktreeCreate"}]}],
+    "WorktreeRemove": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_worktree.py WorktreeRemove"}]}],
+    "TaskCreated": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_task.py TaskCreated"}]}],
+    "TaskCompleted": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_task.py TaskCompleted"}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_task.py SubagentStart"}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_task.py SubagentStop"}]}],
+    "PreCompact": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_compact.py PreCompact"}]}],
+    "PostCompact": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_compact.py PostCompact"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_stop.py"}]}],
+    "StopFailure": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_stop_failure.py"}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rocrate_session_end.py"}]}]
+  }
+}

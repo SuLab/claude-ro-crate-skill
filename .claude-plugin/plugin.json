@@ -1,0 +1,8 @@
+{
+  "name": "ro-crate-run",
+  "displayName": "RO-Crate Run",
+  "version": "0.1.0",
+  "description": "Capture, checkpoint, validate, and finalize RO-Crate provenance for Claude Code sessions.",
+  "license": "Apache-2.0",
+  "skills": "./skills"
+}

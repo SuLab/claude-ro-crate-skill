@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+from typing import Any
+
+from ro_crate_run.constants import PROFILE_URIS, RO_CRATE_SPEC_URI
+from ro_crate_run.files import sha256_file
+from ro_crate_run.models import ValidationFinding
+
+from .context import ValidationContext
+from .jsonld import expand_metadata
+
+_ROOT_REQUIRED_ALWAYS = ("name", "description", "license")
+_ROOT_REQUIRED_CONDITIONAL = ("datePublished",)
+
+
+def _recorded_sha256(entity: dict[str, Any]) -> str | None:
+    """Return the bare sha256 hex recorded on a File entity, if any.
+
+    The hash is carried as an ``identifier`` PropertyValue (propertyID ``sha256``);
+    files skipped for hashing (e.g. over the size limit) carry no such value.
+    """
+    identifier = entity.get("identifier")
+    candidates = identifier if isinstance(identifier, list) else [identifier]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("propertyID") == "sha256":
+            value = candidate.get("value")
+            if isinstance(value, str) and value:
+                return value.replace("sha256:", "")
+    return None
+
+
+def _contains_null(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_null(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_null(v) for v in value)
+    return False
+
+
+def _is_action_type(value: Any) -> bool:
+    values = value if isinstance(value, list) else [value]
+    return any(str(item).endswith("Action") for item in values)
+
+
+def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    metadata = ctx.metadata
+    if metadata is None:
+        if not (ctx.state_dir / "ro-crate" / "ro-crate-metadata.json").exists():
+            findings.append(ValidationFinding("ro_crate", "metadata_missing", "ro-crate-metadata.json is missing"))
+        else:
+            findings.append(ValidationFinding("ro_crate", "metadata_invalid_json", "ro-crate-metadata.json is not valid JSON"))
+        return findings
+
+    triples, expand_error = expand_metadata(metadata)
+    if expand_error is not None:
+        findings.append(ValidationFinding("ro_crate", "jsonld_expansion_failed", f"JSON-LD did not expand: {expand_error}"))
+    elif triples == 0:
+        findings.append(ValidationFinding("ro_crate", "jsonld_empty", "JSON-LD expanded to zero triples"))
+
+    entities = {e.get("@id"): e for e in metadata.get("@graph", [])}
+    descriptor = entities.get("ro-crate-metadata.json")
+    root = entities.get("./")
+
+    if not descriptor or descriptor.get("conformsTo", {}).get("@id") != RO_CRATE_SPEC_URI:
+        findings.append(ValidationFinding("ro_crate", "descriptor_invalid_conforms_to", "Descriptor must conform to RO-Crate 1.2"))
+    if not descriptor or descriptor.get("about", {}).get("@id") != "./":
+        findings.append(ValidationFinding("ro_crate", "descriptor_about_invalid", "Descriptor must point to root"))
+
+    if not root:
+        findings.append(ValidationFinding("ro_crate", "root_missing", "Root Data Entity is missing"))
+        return findings
+
+    if root.get("@type") != "Dataset" and "Dataset" not in root.get("@type", []):
+        findings.append(ValidationFinding("ro_crate", "root_not_dataset", "Root must be Dataset"))
+    for key in _ROOT_REQUIRED_ALWAYS:
+        if key not in root:
+            findings.append(ValidationFinding("ro_crate", f"root_missing_{key}", f"Root missing {key}"))
+    if ctx.cfg.validation.require_date_published and "datePublished" not in root:
+        findings.append(ValidationFinding("ro_crate", "root_missing_datePublished", "Root missing datePublished"))
+
+    conforms = root.get("conformsTo", [])
+    if isinstance(conforms, dict):
+        conforms = [conforms]
+    selected_uri = PROFILE_URIS.get(ctx.state.selected_profile, "")
+    if {"@id": ctx.state.profile_uri} not in conforms and {"@id": selected_uri} not in conforms:
+        findings.append(ValidationFinding("profile", "root_missing_profile", "Root missing selected profile conformance"))
+
+    if _contains_null(metadata):
+        findings.append(ValidationFinding("ro_crate", "json_null_present", "Metadata contains JSON null"))
+
+    if ctx.strict and not [e for e in entities.values() if _is_action_type(e.get("@type"))]:
+        findings.append(ValidationFinding("profile", "no_actions", "Strict Process Run Crate requires an action"))
+
+    crate_dir = ctx.state_dir / "ro-crate"
+    project_root = ctx.state_dir.parent
+    for entity in metadata.get("@graph", []):
+        eid = str(entity.get("@id", ""))
+        types = entity.get("@type", [])
+        types = types if isinstance(types, list) else [types]
+        if "File" not in types and "Dataset" not in types:
+            continue
+        if eid.startswith(("http://", "https://", "urn:", "file:", "#", "./")) or eid == "ro-crate-metadata.json":
+            continue
+        if entity.get("contentUrl") or entity.get("external"):
+            continue
+        crate_path = crate_dir / eid
+        project_path = project_root / eid
+        resolved = crate_path if crate_path.exists() else project_path if project_path.exists() else None
+        if resolved is None:
+            findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
+            continue
+        # Content integrity: a crate's recorded sha256 must match the bytes it points to.
+        # Re-hashing here catches post-checkpoint drift of referenced files and corruption
+        # of embedded copies — without it, a stale/false hash passes validation silently.
+        if "File" in types and resolved.is_file():
+            recorded = _recorded_sha256(entity)
+            if recorded is not None and sha256_file(resolved).replace("sha256:", "") != recorded:
+                findings.append(
+                    ValidationFinding(
+                        "ro_crate",
+                        "file_content_mismatch",
+                        f"Recorded sha256 does not match file content: {eid}",
+                        path=eid,
+                    )
+                )
+    return findings

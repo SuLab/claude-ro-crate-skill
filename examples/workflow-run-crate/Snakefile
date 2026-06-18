@@ -1,0 +1,3 @@
+rule all:
+    output: "results/out.txt"
+    shell: "mkdir -p results && echo ok > results/out.txt"

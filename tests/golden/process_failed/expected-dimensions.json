@@ -1,0 +1,35 @@
+{
+  "actions": {
+    "python3 -c 'import sys; sys.stderr.write('\"'\"'boom\\n'\"'\"'); sys.exit(3)' [cmd_000004]": {
+      "has_error": true,
+      "instrument": "#software/python3",
+      "object": [],
+      "result": [],
+      "status": "http://schema.org/FailedActionStatus",
+      "type": [
+        "Action"
+      ]
+    }
+  },
+  "entity_types": {
+    "Action": 1,
+    "CreativeWork": 2,
+    "Dataset": 1,
+    "File": 3,
+    "Person": 1,
+    "Profile": 1,
+    "SoftwareApplication": 5
+  },
+  "root_conformsTo": [
+    "https://w3id.org/ro/wfrun/process/0.5"
+  ],
+  "root_hasPart": [],
+  "root_mainEntity": null,
+  "root_mentions_count": 1,
+  "stable_file_ids": [
+    ".ro-crate-run/commands/cmd_000004.json",
+    ".ro-crate-run/logs/cmd_000004.stderr.txt",
+    ".ro-crate-run/logs/cmd_000004.stdout.txt"
+  ],
+  "validation_status": "warning"
+}

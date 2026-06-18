@@ -1,0 +1,104 @@
+{
+  "actions": {
+    "ControlAction/#step/normalize": {
+      "has_error": false,
+      "instrument": "#step/normalize",
+      "object": [
+        "python3 -c 'open('\"'\"'mid.txt'\"'\"','\"'\"'w'\"'\"').write('\"'\"'mid\\n'\"'\"')' [cmd_000007]"
+      ],
+      "result": [],
+      "status": null,
+      "type": [
+        "ControlAction"
+      ]
+    },
+    "ControlAction/#step/summarize": {
+      "has_error": false,
+      "instrument": "#step/summarize",
+      "object": [
+        "python3 -c 'open('\"'\"'final.txt'\"'\"','\"'\"'w'\"'\"').write(open('\"'\"'mid.txt'\"'\"').read()+'\"'\"'done'\"'\"')' [cmd_000011]"
+      ],
+      "result": [],
+      "status": null,
+      "type": [
+        "ControlAction"
+      ]
+    },
+    "Execute workflow for Prov": {
+      "has_error": false,
+      "instrument": "flow.cwl",
+      "object": [],
+      "result": [
+        "final.txt"
+      ],
+      "status": "http://schema.org/CompletedActionStatus",
+      "type": [
+        "CreateAction"
+      ]
+    },
+    "python3 -c 'open('\"'\"'final.txt'\"'\"','\"'\"'w'\"'\"').write(open('\"'\"'mid.txt'\"'\"').read()+'\"'\"'done'\"'\"')' [cmd_000011]": {
+      "has_error": false,
+      "instrument": "#software/python3",
+      "object": [
+        "mid.txt"
+      ],
+      "result": [
+        "final.txt"
+      ],
+      "status": "http://schema.org/CompletedActionStatus",
+      "type": [
+        "CreateAction"
+      ]
+    },
+    "python3 -c 'open('\"'\"'mid.txt'\"'\"','\"'\"'w'\"'\"').write('\"'\"'mid\\n'\"'\"')' [cmd_000007]": {
+      "has_error": false,
+      "instrument": "#software/python3",
+      "object": [],
+      "result": [
+        "mid.txt"
+      ],
+      "status": "http://schema.org/CompletedActionStatus",
+      "type": [
+        "CreateAction"
+      ]
+    }
+  },
+  "entity_types": {
+    "ComputationalWorkflow": 1,
+    "ControlAction": 2,
+    "CreateAction": 3,
+    "CreativeWork": 2,
+    "Dataset": 1,
+    "File": 9,
+    "FormalParameter": 1,
+    "HowTo": 1,
+    "HowToStep": 2,
+    "Person": 1,
+    "Profile": 1,
+    "PropertyValue": 3,
+    "SoftwareApplication": 7,
+    "SoftwareSourceCode": 1
+  },
+  "root_conformsTo": [
+    "https://w3id.org/ro/wfrun/provenance/0.5"
+  ],
+  "root_hasPart": [
+    "final.txt",
+    "flow.cwl",
+    "mid.txt"
+  ],
+  "root_mainEntity": "flow.cwl",
+  "root_mentions_count": 3,
+  "stable_file_ids": [
+    ".ro-crate-run/commands/cmd_000007.json",
+    ".ro-crate-run/commands/cmd_000011.json",
+    ".ro-crate-run/logs/cmd_000007.stderr.txt",
+    ".ro-crate-run/logs/cmd_000007.stdout.txt",
+    ".ro-crate-run/logs/cmd_000011.stderr.txt",
+    ".ro-crate-run/logs/cmd_000011.stdout.txt",
+    "final.txt",
+    "flow.cwl",
+    "mid.txt"
+  ],
+  "validation_status": "warning"
+}

@@ -1,0 +1,63 @@
+{
+  "actions": {
+    "python3 -c 'open('\"'\"'final.txt'\"'\"','\"'\"'w'\"'\"').write(open('\"'\"'step1.txt'\"'\"').read()+'\"'\"'!'\"'\"')' [cmd_000007]": {
+      "has_error": false,
+      "instrument": "#software/python3",
+      "object": [
+        "step1.txt"
+      ],
+      "result": [
+        "final.txt"
+      ],
+      "status": "http://schema.org/CompletedActionStatus",
+      "type": [
+        "CreateAction"
+      ]
+    },
+    "python3 -c 'open('\"'\"'step1.txt'\"'\"','\"'\"'w'\"'\"').write(str(len(open('\"'\"'in.txt'\"'\"').read().split())))' [cmd_000005]": {
+      "has_error": false,
+      "instrument": "#software/python3",
+      "object": [
+        "in.txt"
+      ],
+      "result": [
+        "step1.txt"
+      ],
+      "status": "http://schema.org/CompletedActionStatus",
+      "type": [
+        "CreateAction"
+      ]
+    }
+  },
+  "entity_types": {
+    "CreateAction": 2,
+    "CreativeWork": 2,
+    "Dataset": 1,
+    "File": 9,
+    "Person": 1,
+    "Profile": 1,
+    "PropertyValue": 3,
+    "SoftwareApplication": 5
+  },
+  "root_conformsTo": [
+    "https://w3id.org/ro/wfrun/process/0.5"
+  ],
+  "root_hasPart": [
+    "final.txt",
+    "step1.txt"
+  ],
+  "root_mainEntity": null,
+  "root_mentions_count": 2,
+  "stable_file_ids": [
+    ".ro-crate-run/commands/cmd_000005.json",
+    ".ro-crate-run/commands/cmd_000007.json",
+    ".ro-crate-run/logs/cmd_000005.stderr.txt",
+    ".ro-crate-run/logs/cmd_000005.stdout.txt",
+    ".ro-crate-run/logs/cmd_000007.stderr.txt",
+    ".ro-crate-run/logs/cmd_000007.stdout.txt",
+    "final.txt",
+    "in.txt",
+    "step1.txt"
+  ],
+  "validation_status": "warning"
+}

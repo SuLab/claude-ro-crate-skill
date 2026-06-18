@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ro-crate-run"
+version = "0.1.0"
+description = "Claude Code RO-Crate provenance capture plugin and CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "RO-Crate Run contributors" }]
+dependencies = [
+  "filelock>=3.13,<4",
+  "rdflib>=7,<8",
+  "rocrate>=0.15,<0.16"
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.10,<2",
+  "pytest>=8,<9",
+  "pytest-cov>=5,<7",
+  "ruff>=0.5,<1",
+  "types-setuptools"
+]
+shacl = ["pyshacl>=0.26,<1"]
+signing = ["cryptography>=42,<46"]
+
+[project.scripts]
+rcr = "ro_crate_run.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+ro_crate_run = ["assets/**"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = ["E501", "UP007", "UP045"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+packages = ["ro_crate_run"]
+
+[[tool.mypy.overrides]]
+module = ["pyshacl", "pyshacl.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["src"]
