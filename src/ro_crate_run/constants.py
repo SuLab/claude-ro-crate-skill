@@ -20,6 +20,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "run.started",
         "run.resumed",
         "run.finalized",
+        "run.export.blocked",
         "run.aborted",
         "run.config.updated",
         # Environment & system

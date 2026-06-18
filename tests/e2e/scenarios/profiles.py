@@ -181,7 +181,7 @@ SCENARIOS: list[ScenarioSpec] = [
         expected_profile_uri=PROCESS_URI,
         append_system_prompt=STRICT_PREAMBLE,
         coverage_tags=frozenset({
-            "entity:Action", "action:error",
+            "entity:Action", "prop:action:error",
         }),
         check=_check_proc_failed,
         prompt=prescriptive_prompt(

@@ -43,6 +43,17 @@ def finalize(
     report = validate_run(state_dir, strict=False, public=public, crate_dir=staging)
     if report.status == "failed":
         shutil.rmtree(staging, ignore_errors=True)
+        # Record the blocked attempt for the audit trail (SPEC §13.4); the gate fails
+        # closed, so nothing is shipped.
+        EventWriter(state_dir).append(
+            "run.export.blocked",
+            {
+                "public": public,
+                "reason": "privacy gate failed",
+                "findings": [f.code for f in report.errors],
+            },
+            source_kind="materializer",
+        )
         return 1
 
     summary_path = state_dir / "reports" / "final-summary.json"
