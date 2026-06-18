@@ -31,6 +31,17 @@ python -m pytest tests/golden/test_golden_crates.py          # UPDATE_GOLDEN=1 r
 python -m pytest -k materialize
 ```
 
+Real-world e2e suite (drives the actual `claude` CLI through the skill; opt-in, needs network + tokens):
+
+```bash
+RCR_E2E=1 python -m pytest tests/e2e -m e2e        # gated; skipped without RCR_E2E=1
+python -m tests.e2e.run --jobs 6                   # standalone driver + coverage/validation report
+python -m tests.e2e.run --name proc-minimal --keep # single scenario, retain temp dir
+python -m pytest tests/e2e/test_e2e_coverage.py    # offline: surface-tag matrix sanity
+```
+
+`tests/e2e/` launches headless `claude` in throwaway temp projects, then validates the emitted crate (`assertions.assert_crate`: no dangling refs, descriptor + profile conformance, zero validation errors, scenario-specific entities, public leak scan). `coverage.py` is a 136-tag matrix of every command/flag/entity/field; `run.py` fails if the union of *passing* scenarios doesn't cover it. The harness puts `.venv/bin` on PATH so the skill's `rcr` + hooks resolve to repo `src/` (live fixes), and `protect_repo()` makes `src/skills/hooks/templates` read-only during runs so a bypassPermissions agent can't edit the code under test. Default model `sonnet`.
+
 - ruff: line-length 100, `E501`/`UP007`/`UP045` ignored. Every module uses `from __future__ import annotations` (keep it — enables `X | None` on the 3.9 floor).
 - Runtime deps: `rocrate`, `rdflib` (used for real JSON-LD expansion in validation), `filelock`. Optional extras: `pyshacl` (SHACL, has a `[[tool.mypy.overrides]]` so the gate passes with or without it) and `cryptography` (Ed25519 signing). Code that imports an optional dep must degrade gracefully and must not leave an unused `# type: ignore` (breaks strict mypy when the extra IS installed).
 
