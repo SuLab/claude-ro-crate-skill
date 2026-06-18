@@ -68,6 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("value")
     p.add_argument("--formal-parameter")
     p.add_argument("--type")
+    p.add_argument("--connect-from", help="source parameter @id of a ParameterConnection")
+    p.add_argument("--connect-to", help="target parameter @id of a ParameterConnection")
+    p = sub.add_parser("container")
+    p.add_argument("ref", help="image reference, e.g. docker.io/library/python:3.12")
+    p.add_argument("--digest", help="sha256 digest")
     p = sub.add_parser("software")
     p.add_argument("command_or_name")
     p.add_argument("--version")
@@ -155,7 +160,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.existence,
         )
     if args.cmd == "parameter":
-        return commands.parameter(args.name, args.value, args.formal_parameter, args.type)
+        return commands.parameter(
+            args.name, args.value, args.formal_parameter, args.type,
+            connect_from=args.connect_from, connect_to=args.connect_to,
+        )
+    if args.cmd == "container":
+        return commands.container(args.ref, args.digest)
     if args.cmd == "software":
         return commands.software(args.command_or_name, args.version, args.type)
     if args.cmd == "run":

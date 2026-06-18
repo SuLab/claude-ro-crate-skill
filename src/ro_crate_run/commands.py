@@ -342,15 +342,62 @@ def _classify_existence(path: str, kind: str, required: bool) -> str:
     return "missing" if required else "declared-only"
 
 
-def parameter(name: str, value: str, formal_parameter: str | None, value_type: str | None) -> int:
+def parameter(
+    name: str,
+    value: str,
+    formal_parameter: str | None,
+    value_type: str | None,
+    *,
+    connect_from: str | None = None,
+    connect_to: str | None = None,
+) -> int:
     ctx = ProjectContext.from_cwd()
-    payload = {"name": name, "value": value}
+    payload: dict[str, object] = {"name": name, "value": value}
     if formal_parameter:
         payload["formal_parameter"] = formal_parameter
     if value_type:
         payload["type"] = value_type
+    if connect_from and connect_to:
+        # ParameterConnection: links an upstream output parameter to a downstream input.
+        payload["connection"] = {"source": connect_from, "target": connect_to}
     EventWriter(ctx.state_dir).append(
         "workflow.parameter.declared",
+        payload,
+        source_kind="human_cli",
+        declared=True,
+        observed=False,
+    )
+    return 0
+
+
+def _parse_image_ref(ref: str) -> tuple[str, str, str, str]:
+    """Split an OCI image reference into (registry, image, tag, digest)."""
+    registry = ""
+    digest = ""
+    if "@" in ref:
+        ref, digest = ref.split("@", 1)
+    if "/" in ref:
+        first, rest = ref.split("/", 1)
+        # A leading segment with a dot, a port, or "localhost" is a registry host.
+        if "." in first or ":" in first or first == "localhost":
+            registry, ref = first, rest
+    tag = ""
+    if ":" in ref:
+        ref, tag = ref.rsplit(":", 1)
+    return registry, ref, tag, digest
+
+
+def container(ref: str, digest: str | None = None) -> int:
+    ctx = ProjectContext.from_cwd()
+    registry, image, tag, ref_digest = _parse_image_ref(ref)
+    payload = {
+        "registry": registry,
+        "image": image,
+        "tag": tag,
+        "digest": digest or ref_digest,
+    }
+    EventWriter(ctx.state_dir).append(
+        "container.observed",
         payload,
         source_kind="human_cli",
         declared=True,
