@@ -138,6 +138,19 @@ def test_rocrate_clean_checkpoint(tmp_path: Path, monkeypatch) -> None:  # type:
     assert [f for f in findings if f.level == "ro_crate"] == []
 
 
+def test_rocrate_declared_absent_file_not_flagged_missing(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A file declared with a non-present existence (e.g. "expected") is legitimately
+    # absent on disk and must not be reported as referenced_file_missing.
+    state_dir = _start(tmp_path, monkeypatch)
+    assert main(["output", "future.txt", "--existence", "expected"]) == 0
+    assert main(["run", "--", "python3", "-c", "print('x')"]) == 0
+    assert main(["checkpoint"]) == 0
+    findings = check_rocrate(build_context(state_dir, strict=False, public=False))
+    assert not any(
+        f.code == "referenced_file_missing" and f.path == "future.txt" for f in findings
+    )
+
+
 def test_rocrate_missing_metadata(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     state_dir = _start(tmp_path, monkeypatch)  # no checkpoint -> no metadata
     findings = check_rocrate(build_context(state_dir, strict=False, public=False))

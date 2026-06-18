@@ -111,7 +111,16 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
 
     crate_dir = ctx.state_dir / "ro-crate"
     project_root = ctx.state_dir.parent
-    deleted_ids = _deleted_file_ids(metadata.get("@graph", []))
+    # Files legitimately absent on disk: removed by a recorded DeleteAction, or declared
+    # with an existence that does not imply local presence (remote/expected/missing/
+    # declared-only). Such entities must not be reported as referenced_file_missing.
+    _ABSENT_EXISTENCE = {"observed remote", "expected", "missing", "declared-only"}
+    absent_ids = {
+        str(d.get("path"))
+        for d in (ctx.state.declared_inputs + ctx.state.declared_outputs)
+        if d.get("existence") in _ABSENT_EXISTENCE
+    }
+    exempt_ids = _deleted_file_ids(metadata.get("@graph", [])) | absent_ids
     for entity in metadata.get("@graph", []):
         eid = str(entity.get("@id", ""))
         types = entity.get("@type", [])
@@ -126,8 +135,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         project_path = project_root / eid
         resolved = crate_path if crate_path.exists() else project_path if project_path.exists() else None
         if resolved is None:
-            # A file removed by a recorded DeleteAction is legitimately absent on disk.
-            if eid not in deleted_ids:
+            if eid not in exempt_ids:
                 findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
             continue
         # Content integrity: a crate's recorded sha256 must match the bytes it points to.
