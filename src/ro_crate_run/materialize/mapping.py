@@ -299,15 +299,27 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
     if not model.workflow:
         return []
     wf_path = str(model.workflow["path"])
+    synthetic = bool(model.workflow.get("synthetic"))
     _, formal_param_map = workflow_formal_parameters(model)
-    types: list[str] = ["File", "SoftwareSourceCode", "ComputationalWorkflow"]
+    # A synthesized workflow (the agent's own actions) is not a file on disk, so it must
+    # NOT carry the "File" type — that would make L2 demand a non-existent file. Its
+    # fragment @id (#workflow/...) is also skipped by the file-existence check.
+    types: list[str] = (
+        ["SoftwareSourceCode", "ComputationalWorkflow"]
+        if synthetic
+        else ["File", "SoftwareSourceCode", "ComputationalWorkflow"]
+    )
     if model.steps:
         types.append("HowTo")
     entity: dict[str, Any] = {
         "@id": wf_path,
         "@type": types,
         "name": model.workflow.get("name", os.path.basename(wf_path)),
-        "description": "Workflow definition",
+        "description": (
+            "Workflow describing the actions taken by the Claude Code agent."
+            if synthetic
+            else "Workflow definition"
+        ),
         "programmingLanguage": model.workflow.get("engine", "workflow"),
     }
     input_refs = [

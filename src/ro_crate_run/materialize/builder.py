@@ -205,7 +205,10 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     if workflow_entities:
         wf_id = workflow_entities[0]["@id"]
         root["mainEntity"] = {"@id": wf_id}
-        if {"@id": wf_id} not in root["hasPart"]:
+        # A synthesized workflow is an abstract entity (the agent's actions), not a file,
+        # so it is referenced via mainEntity only and is not part of the data payload.
+        synthetic_wf = bool(model.workflow and model.workflow.get("synthetic"))
+        if not synthetic_wf and {"@id": wf_id} not in root["hasPart"]:
             root["hasPart"].append({"@id": wf_id})
 
     # --- Workflow-level action (workflow/provenance profiles only) ---
@@ -259,6 +262,31 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
                     graph.append(mapping.build_file_entity(fallback, max_hash_bytes))
                     root["hasPart"].append({"@id": output_id})
                 file_ids.add(output_id)
+        # Ensure command inputs referenced as the action's `object` have File entities
+        # even when not separately declared via `rcr input` (otherwise the object ref
+        # would dangle). Inputs are not forced into hasPart — they are referenced only.
+        from dataclasses import dataclass as _dataclass
+        for input_path in command.inputs:
+            input_id = _file_id(input_path, project_dir)
+            if input_id in file_ids or input_id.startswith(
+                ("http://", "https://", "urn:", "file:", "#")
+            ):
+                file_ids.add(input_id)
+                continue
+
+            @_dataclass
+            class _InputPlan:
+                file_id: str
+                abs_path: Path
+                declared: dict  # type: ignore[type-arg]
+
+            input_plan = _InputPlan(
+                file_id=input_id,
+                abs_path=project_dir / input_path,
+                declared={"path": input_path, "description": "Command input"},
+            )
+            graph.append(mapping.build_file_entity(input_plan, max_hash_bytes))
+            file_ids.add(input_id)
 
     # --- Notes, decisions, parameter connections ---
     note_decision = mapping.build_notes_decisions(model)

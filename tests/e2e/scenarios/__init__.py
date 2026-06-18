@@ -9,19 +9,22 @@ from tests.e2e.scenarios import (
     profiles,
     recovery,
 )
-
-# Prepended (via --append-system-prompt) to prescriptive scenarios so the agent runs the
-# listed rcr commands verbatim, making the captured provenance deterministic.
-STRICT_PREAMBLE = (
-    "You are capturing provenance with the ro-crate-run skill. Run EXACTLY the rcr "
-    "commands listed in the user message, in order, verbatim. Do not add, skip, "
-    "reorder, or substitute commands. Use the bundled rcr CLI. When a step says to "
-    "create a file, create it. After the last command, stop."
+from tests.e2e.scenarios._common import (
+    PROCESS_URI,
+    PROVENANCE_URI,
+    STRICT_PREAMBLE,
+    WORKFLOW_URI,
 )
 
-PROCESS_URI = "https://w3id.org/ro/wfrun/process/0.5"
-WORKFLOW_URI = "https://w3id.org/ro/wfrun/workflow/0.5"
-PROVENANCE_URI = "https://w3id.org/ro/wfrun/provenance/0.5"
+__all__ = [
+    "ALL_SCENARIOS",
+    "PROCESS_URI",
+    "PROVENANCE_URI",
+    "STRICT_PREAMBLE",
+    "WORKFLOW_URI",
+    "by_area",
+    "by_name",
+]
 
 ALL_SCENARIOS = (
     profiles.SCENARIOS

@@ -60,6 +60,10 @@ def build_context(
     state = load_state(state_dir)
     cfg = load_config(state_dir)
     events, parse_error = _read_events_safe(state_dir)
+    # Filter to the current run's events so multi-run journals (e.g. hook-initiated
+    # run followed by an explicit rcr start) don't break sequence/hash-chain checks.
+    if state.run_id:
+        events = [e for e in events if e.get("run_id") == state.run_id]
     active = is_active_run(events)
     return ValidationContext(
         state_dir=state_dir,

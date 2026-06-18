@@ -44,6 +44,21 @@ def _is_action_type(value: Any) -> bool:
     return any(str(item).endswith("Action") for item in values)
 
 
+def _deleted_file_ids(graph: list[dict[str, Any]]) -> set[str]:
+    """@ids of files removed by a recorded DeleteAction — legitimately absent on disk."""
+    ids: set[str] = set()
+    for entity in graph:
+        types = entity.get("@type", [])
+        types = types if isinstance(types, list) else [types]
+        if "DeleteAction" not in types:
+            continue
+        for key in ("object", "result"):
+            refs = entity.get(key, [])
+            refs = refs if isinstance(refs, list) else [refs]
+            ids.update(str(r["@id"]) for r in refs if isinstance(r, dict) and r.get("@id"))
+    return ids
+
+
 def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     metadata = ctx.metadata
@@ -96,6 +111,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
 
     crate_dir = ctx.state_dir / "ro-crate"
     project_root = ctx.state_dir.parent
+    deleted_ids = _deleted_file_ids(metadata.get("@graph", []))
     for entity in metadata.get("@graph", []):
         eid = str(entity.get("@id", ""))
         types = entity.get("@type", [])
@@ -110,7 +126,9 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         project_path = project_root / eid
         resolved = crate_path if crate_path.exists() else project_path if project_path.exists() else None
         if resolved is None:
-            findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
+            # A file removed by a recorded DeleteAction is legitimately absent on disk.
+            if eid not in deleted_ids:
+                findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
             continue
         # Content integrity: a crate's recorded sha256 must match the bytes it points to.
         # Re-hashing here catches post-checkpoint drift of referenced files and corruption

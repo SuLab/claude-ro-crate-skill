@@ -176,11 +176,21 @@ def test_profile_missing_required_output(tmp_path: Path, monkeypatch) -> None:  
     assert any(f.code == "missing_required_output" for f in findings)
 
 
-def test_profile_workflow_requires_main_entity(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_profile_workflow_synthesizes_agent_workflow(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The agent's own actions ARE the workflow (SPEC §16): forcing the workflow profile
+    # with no external definition file synthesizes a ComputationalWorkflow + mainEntity,
+    # so there are no missing-entity findings.
     state_dir = _start(tmp_path, monkeypatch)
-    main(["checkpoint", "--profile", "workflow"])  # may return 1 — workflow without mainEntity
+    main(["run", "--", "python3", "-c", "print('hi')"])
+    main(["checkpoint", "--profile", "workflow"])
     findings = check_profile(build_context(state_dir, strict=False, public=False))
-    assert any(f.code == "workflow_missing_main_entity" for f in findings)
+    assert not any(f.code == "workflow_missing_main_entity" for f in findings)
+    assert not any(f.code == "workflow_missing_entity" for f in findings)
+    meta = _json.loads((state_dir / "ro-crate" / "ro-crate-metadata.json").read_text())
+    ids = {e.get("@id") for e in meta["@graph"]}
+    assert "#workflow/agent-actions" in ids
+    root = next(e for e in meta["@graph"] if e.get("@id") == "./")
+    assert root.get("mainEntity", {}).get("@id") == "#workflow/agent-actions"
 
 
 # --- Level 4: reproducibility tests ---

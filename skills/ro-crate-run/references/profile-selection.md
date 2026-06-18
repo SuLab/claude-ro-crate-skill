@@ -8,20 +8,29 @@ Three run-profile levels exist, each a superset of the previous:
 2. **Workflow Run Crate** — `https://w3id.org/ro/wfrun/workflow/0.5` — adds a formal workflow definition + engine.
 3. **Provenance Run Crate** — `https://w3id.org/ro/wfrun/provenance/0.5` — adds per-step actions and evidence.
 
-## Automatic Promotion (SPEC §16.2)
+## The workflow is the agent's actions
+
+In this skill the **workflow is the set of actions taken by the Claude Code agent(s)**,
+not a specific workflow-management system. An external workflow definition (CWL,
+Snakemake, Nextflow, Galaxy, WDL) is *optional enrichment*, never required. When the
+workflow/provenance profile applies and no external definition file was declared, the
+materializer synthesizes an abstract `ComputationalWorkflow` (`#workflow/agent-actions`)
+standing for the agent's run, so the crate still conforms.
+
+## Automatic Promotion (SPEC §16)
 
 Selection is performed by `materialize/profiles.select_profile`. With `requested_profile = "auto"`:
 
-| Condition                                                          | Selected profile  | Confidence |
-|--------------------------------------------------------------------|-------------------|------------|
-| Formal workflow definition + engine + workflow-level IO + action   | workflow          | medium     |
-| Above AND step-level actions + evidence                            | provenance        | high       |
-| None of the above                                                  | process           | high (cmds)|
-| No commands recorded yet                                           | process           | low        |
+| Condition                                                              | Selected profile  | Confidence |
+|------------------------------------------------------------------------|-------------------|------------|
+| Step execution evidence (`rcr step` execution or `rcr run --step`)     | provenance        | high       |
+| External workflow definition declared                                  | workflow          | medium/high|
+| Structured agent work: phases, or more than one command                | workflow          | medium     |
+| A single, flat command                                                 | process           | high       |
+| No commands recorded yet                                               | process           | low        |
 
-Workflow adapter detection (`adapters.detect_engine`) is called during profile selection to discover engine
-and step IDs from the workflow definition file, feeding provenance promotion even when no explicit
-`rcr step` events were recorded.
+Workflow adapter detection (`adapters.detect_engine`) is still called when an external
+definition file is present, to discover engine and step IDs from it.
 
 ## Forced Profiles
 
@@ -57,5 +66,7 @@ Discovered steps are merged into `model.steps` with status `"identified"` if not
 
 ## Phase Labels vs Profile
 
-Phase labels (from `rcr phase`) record logical phases of a project but do NOT by themselves
-trigger profile promotion. Profile selection is driven by workflow/step evidence only.
+Phase labels (from `rcr phase`) are structured agent work, so they DO promote `auto` runs
+to Workflow Run Crate (the phases are part of the agent's workflow). They do NOT by
+themselves reach Provenance Run Crate — that still requires step-level execution evidence
+(`rcr step` / `rcr run --step`).

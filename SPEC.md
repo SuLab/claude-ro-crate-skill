@@ -33,7 +33,7 @@ The draft's central architecture is sound. A provenance system for Claude Code s
 
 The draft also correctly identifies the important provenance gap in human-in-the-loop agentic coding: Claude Code can edit files and run commands, but humans may also run terminal commands outside the session. A wrapper CLI is therefore required for manual terminal capture.
 
-The default-to-Process-Run-Crate policy is also correct. Most Claude Code sessions are ad hoc computational or software-development activities. They should not be promoted to Workflow Run Crate unless a computational workflow definition exists, and they should not be promoted to Provenance Run Crate unless step-level execution evidence exists.
+The default-to-Process-Run-Crate policy applies to ad hoc, single-command activity. Because the actions taken by the agent themselves constitute the workflow (§16), structured agent work — multiple commands or declared phases — is promoted to Workflow Run Crate (synthesizing the workflow from those actions when no external definition file exists), and runs with step-level execution evidence are promoted to Provenance Run Crate.
 
 ### 2.2 Required corrections
 
@@ -405,7 +405,7 @@ The body of `SKILL.md` MUST instruct Claude to:
 8. Checkpoint after major phases and before finalization.
 9. Never invent execution facts.
 10. Mark inferred metadata as inferred in event payloads.
-11. Prefer Process Run Crate unless formal workflow evidence exists.
+11. The agent's actions are the workflow: use Process Run Crate for single, flat command runs; structured work (multiple commands or phases) is a Workflow Run Crate, synthesizing the workflow from the agent's actions when no external definition file exists.
 12. Promote to Provenance Run Crate only with step-level execution evidence.
 13. Treat hook-captured events as observed facts.
 14. Treat user-declared metadata as declarations, not observations.
@@ -1276,11 +1276,15 @@ Failed action example, with the stderr log linked back to the failed action via 
 
 ### 15.9 Workflow Run mapping
 
-When a formal workflow is identified:
+For a Workflow Run Crate (whether the workflow is the agent's synthesized actions or an
+external definition):
 
 1. The root `conformsTo` includes Workflow Run Crate profile URI.
 2. The root `mainEntity` points to the main `ComputationalWorkflow`.
-3. The main workflow is a `File`, `SoftwareSourceCode`, and `ComputationalWorkflow`.
+3. The main workflow entity is a `ComputationalWorkflow` (and `SoftwareSourceCode`). When
+   it is an external definition file it also has type `File` and appears in `hasPart`;
+   when it is synthesized from the agent's actions (§16.5) it is abstract — a fragment
+   `@id`, not a `File`, referenced via `mainEntity` only.
 4. The workflow-level run action uses the workflow as `instrument`.
 5. Workflow inputs and outputs are represented as `FormalParameter` entities.
 6. Concrete files and values link to formal parameters via `exampleOfWork`.
@@ -1342,49 +1346,65 @@ A dirty working tree is not an error by default, but strict validation MAY requi
 
 ## 16. Profile selection
 
+**The workflow is the agent's work.** In this skill the "workflow" is the set of
+actions taken by the Claude Code agent(s) during the run — it is NOT tied to any
+specific workflow-management system. An external workflow definition (CWL, Snakemake,
+Nextflow, Galaxy, WDL, …), when present, is treated as *optional enrichment* of that
+picture, never a precondition. When the Workflow or Provenance profile applies but no
+external definition file was declared, the materializer MUST synthesize a
+`ComputationalWorkflow` entity standing for the agent's run (see §16.5), so the crate
+conforms without requiring a workflow-system file.
+
 ### 16.1 Default profile
 
 Default profile: Process Run Crate.
 
 Use Process Run when:
 
-- Work is ad hoc.
-- Commands are manually or agentically executed.
-- No formal workflow definition exists.
-- One or more computational tools/scripts contribute to a result.
+- The run is a single, flat command execution.
+- One or more computational tools/scripts contribute to a result without explicit
+  structure (no phases, no multiple distinct commands, no declared steps).
 
 ### 16.2 Upgrade to Workflow Run Crate
 
-Upgrade only when all are true:
+The agent's structured work constitutes the workflow. Upgrade when any holds:
 
-1. A formal workflow definition is identified or explicitly declared.
-2. The workflow engine or execution mechanism is known or reasonably inferred.
-3. Workflow-level inputs/outputs can be declared or observed.
-4. A workflow-level execution action can be represented.
+1. The agent's work is structured: more than one command was executed, or one or more
+   phases (`rcr phase`) were declared.
+2. An external workflow definition is identified or explicitly declared (optional
+   enrichment), with its engine/mechanism known or reasonably inferred.
 
-Examples:
-
-- `workflow.cwl` run by `cwltool` or another CWL runner.
-- `main.nf` run by Nextflow.
-- `Snakefile` run by Snakemake.
-- `workflow.ga` or Galaxy invocation.
-- `workflow.wdl` run by a WDL engine.
-- A script explicitly declared as a workflow and meeting workflow indicators.
+A workflow-level execution action MUST be representable (it wraps the agent's commands).
+External examples that enrich the picture: `workflow.cwl` run by `cwltool`; `main.nf`
+run by Nextflow; `Snakefile` run by Snakemake; `workflow.ga` (Galaxy); `workflow.wdl`.
 
 ### 16.3 Upgrade to Provenance Run Crate
 
-Upgrade only when Workflow Run criteria are met and step-level details are available.
+Upgrade when step-level execution evidence exists, with or without an external file.
 
 Evidence may include:
 
-- Workflow engine step logs.
-- Native provenance export.
-- `rcr step` events.
-- `rcr run --step` command mappings.
-- Observed intermediate outputs.
-- Known mapping from workflow steps to execution actions.
+- `rcr step` events and `rcr run --step` command mappings (the primary, agent-native path).
+- Workflow engine step logs or native provenance export (when an external system is used).
+- A known mapping from steps to execution actions, with observed intermediate outputs.
 
-Do not upgrade based only on human phase labels.
+Each step is represented as a `HowToStep` linked to its execution action via a
+`ControlAction`. Do not upgrade based only on human phase labels.
+
+### 16.5 Synthesized agent workflow
+
+When §16.2 or §16.3 applies and no external workflow definition file was declared, the
+materializer synthesizes the main workflow from the agent's actions:
+
+- An (abstract) `ComputationalWorkflow` entity with a fragment `@id`
+  (`#workflow/agent-actions`), `programmingLanguage` `claude-code`, set as the root
+  `mainEntity`. Being abstract (not a `File`), it is referenced via `mainEntity` and is
+  not part of `hasPart`.
+- For Provenance, the agent's declared steps (`rcr step`) become its `HowToStep`s with
+  `ControlAction` links to the per-command actions.
+
+An external definition, when declared (role `workflow-definition`), is used as-is and is
+never overwritten by synthesis.
 
 ### 16.4 Profile selection event
 

@@ -147,10 +147,13 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
             if step_id and step_id not in model.steps:
                 model.steps[step_id] = payload | {"status": "identified"}
     model.commands = list(commands_by_id.values())
-    from .profiles import select_profile
+    from .profiles import select_profile, synthesize_workflow
     selection = select_profile(model, state.requested_profile)
     model.selected_profile = selection.profile
     model.profile_uri = selection.profile_uri
+    # The agent's actions are the workflow: when workflow/provenance is selected with no
+    # external definition file, synthesize one so the crate conforms (SPEC §16).
+    synthesize_workflow(model)
     return model
 
 
