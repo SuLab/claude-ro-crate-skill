@@ -8,13 +8,20 @@ import pytest
 
 from tests.e2e import assertions as A
 from tests.e2e import coverage
-from tests.e2e.harness import run_scenario
+from tests.e2e.harness import protect_repo, run_scenario
 from tests.e2e.scenarios import ALL_SCENARIOS
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RCR_E2E") != "1",
     reason="real-world claude CLI tests; set RCR_E2E=1 to enable",
 )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _protect_repo_source():  # type: ignore[no-untyped-def]
+    """Keep the repo's source-of-truth read-only while real claude sessions run."""
+    with protect_repo():
+        yield
 
 
 @pytest.mark.e2e

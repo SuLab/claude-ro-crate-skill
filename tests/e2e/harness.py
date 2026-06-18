@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,46 @@ RCR = VENV_BIN / "rcr"
 CRATE_REL = Path(".ro-crate-run") / "ro-crate" / "ro-crate-metadata.json"
 
 Launcher = Callable[[ScenarioSpec, Path, dict], "tuple[int, str]"]
+
+# Source-of-truth paths an e2e agent must never modify. The skill's `rcr` resolves
+# `ro_crate_run` to the editable repo `src/`, so a headless agent running under
+# bypassPermissions could otherwise "fix" the very code under test and invalidate
+# results. `protect_repo()` makes these read-only while sessions run (execution only
+# reads them; the materializer writes into each temp project, never the repo).
+_PROTECT_PATHS = ["src", "skills", "hooks", "templates", "SPEC.md", "CLAUDE.md"]
+
+
+def _set_tree_writable(path: Path, *, writable: bool) -> None:
+    if not path.exists():
+        return
+    items = [path, *path.rglob("*")] if path.is_dir() else [path]
+    for p in items:
+        try:
+            mode = p.stat().st_mode
+            p.chmod(mode | 0o200 if writable else mode & ~0o222)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def protect_repo() -> Iterator[None]:
+    """Make the repo's source-of-truth read-only for the duration of e2e sessions."""
+    for rel in _PROTECT_PATHS:
+        _set_tree_writable(REPO_ROOT / rel, writable=False)
+    try:
+        yield
+    finally:
+        for rel in _PROTECT_PATHS:
+            _set_tree_writable(REPO_ROOT / rel, writable=True)
+
+
+def repo_source_dirty() -> str:
+    """Return `git status --porcelain` for protected paths (empty == clean)."""
+    proc = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--", *_PROTECT_PATHS],
+        capture_output=True, text=True,
+    )
+    return proc.stdout.strip()
 
 
 def build_env(workdir: Path) -> dict:

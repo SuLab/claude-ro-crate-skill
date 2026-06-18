@@ -21,7 +21,7 @@ import traceback  # noqa: E402
 
 from tests.e2e import assertions as A  # noqa: E402
 from tests.e2e import coverage  # noqa: E402
-from tests.e2e.harness import run_scenario  # noqa: E402
+from tests.e2e.harness import protect_repo, repo_source_dirty, run_scenario  # noqa: E402
 from tests.e2e.scenarios import ALL_SCENARIOS, by_area, by_name  # noqa: E402
 
 RESULTS = Path(__file__).resolve().parent / "results"
@@ -68,14 +68,23 @@ def main(argv: list | None = None) -> int:
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     records: list = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(_run_one, s, args.model, args.keep): s for s in specs}
-        for fut in concurrent.futures.as_completed(futs):
-            rec = fut.result()
-            records.append(rec)
-            mark = "PASS" if rec["ok"] else "FAIL"
-            print(f"[{mark}] {rec['name']:24s} exit={rec['claude_exit']} "
-                  f"valid={rec['validation_status']} {rec['error'] or ''}")
+    before = set(repo_source_dirty().splitlines())
+    with protect_repo():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+            futs = {ex.submit(_run_one, s, args.model, args.keep): s for s in specs}
+            for fut in concurrent.futures.as_completed(futs):
+                rec = fut.result()
+                records.append(rec)
+                mark = "PASS" if rec["ok"] else "FAIL"
+                print(f"[{mark}] {rec['name']:24s} exit={rec['claude_exit']} "
+                      f"valid={rec['validation_status']} {rec['error'] or ''}")
+
+    # Only changes that appeared DURING the run indicate an agent escaped isolation
+    # (pre-existing uncommitted edits of our own are ignored).
+    dirty = "\n".join(sorted(set(repo_source_dirty().splitlines()) - before))
+    if dirty:
+        print("\n*** REPO SOURCE MODIFIED DURING RUN (an agent escaped isolation) ***")
+        print(dirty)
 
     passed = [r for r in records if r["ok"]]
     report: dict = {
@@ -90,9 +99,11 @@ def main(argv: list | None = None) -> int:
         report["coverage_missing"] = coverage_gap
         if coverage_gap:
             print(f"\nCOVERAGE GAP ({len(coverage_gap)}): {coverage_gap}")
+    report["repo_source_dirty"] = dirty
     (RESULTS / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True))
     print(f"\n{len(passed)}/{len(records)} passed. Report: {RESULTS / 'report.json'}")
-    return 0 if len(passed) == len(records) and not coverage_gap else 1
+    ok = len(passed) == len(records) and not coverage_gap and not dirty
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
