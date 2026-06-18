@@ -16,6 +16,20 @@ class FilePlan:
     copy: bool = False
     included: bool = False
     reason: str = ""
+    sensitive: bool = False
+
+
+# Files that must NEVER be captured (read, hashed, or copied) regardless of config
+# (SPEC §13.1 / privacy policy). Matched case-insensitively against the basename.
+_SENSITIVE_GLOBS = [
+    ".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "id_ed25519",
+    "*.p12", "*.pfx", "*credentials*", "*secret*", "*token*",
+]
+
+
+def _is_sensitive(file_id: str) -> bool:
+    base = Path(file_id).name.lower()
+    return any(fnmatch.fnmatch(base, glob) for glob in _SENSITIVE_GLOBS)
 
 
 def _is_ignored(file_id: str, ignore_patterns: list[str]) -> bool:
@@ -74,6 +88,18 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
             return
         file_id = str(resolved.relative_to(project_dir.resolve()))
         if _is_ignored(file_id, cfg.ignore_patterns):
+            return
+        if _is_sensitive(file_id):
+            # Never read, hash, or copy — only a content-free reference is recorded.
+            plans[file_id] = FilePlan(
+                file_id=file_id,
+                abs_path=resolved,
+                declared=declared,
+                copy=False,
+                included=False,
+                reason="sensitive-never-captured",
+                sensitive=True,
+            )
             return
         included = _included_for_role(role, fp)
         is_file = resolved.exists() and resolved.is_file()

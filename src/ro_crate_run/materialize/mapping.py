@@ -196,6 +196,23 @@ def build_file_entity(
     from ro_crate_run.files import file_record
 
     declared = getattr(plan, "declared", {}) or {}
+    if getattr(plan, "sensitive", False):
+        # Never read content (no hash, no size) — only a content-free reference.
+        sensitive_entity: dict[str, Any] = {
+            "@id": plan.file_id,
+            "@type": "File",
+            "name": os.path.basename(plan.file_id),
+            "description": declared.get("description") or "Sensitive file (never captured)",
+            "additionalProperty": {
+                "@type": "PropertyValue",
+                "propertyID": "capture-status",
+                "value": "not-captured",
+                "description": "sensitive file; never read, hashed, or copied",
+            },
+        }
+        if formal_parameter_id:
+            sensitive_entity["exampleOfWork"] = {"@id": formal_parameter_id}
+        return sensitive_entity
     abs_path: Path = plan.abs_path
     rec = file_record(abs_path, abs_path.parent, max_hash_bytes)
     entity: dict[str, Any] = {
