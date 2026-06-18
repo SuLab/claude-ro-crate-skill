@@ -15,4 +15,5 @@ tests/**/.ro-crate-run/
 tests/**/out.txt
 tests/**/result.txt
 tests/**/normalized.tsv
+tests/e2e/results/
 docs/
