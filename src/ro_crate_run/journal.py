@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Any, cast
@@ -34,8 +35,13 @@ class EventWriter:
         step_id: str | None = None,
         session_id: str | None = None,
         actor: Actor | None = None,
+        hold_lock: bool = True,
     ) -> RcrEvent:
-        with FileLock(str(self.lock_path)):
+        # `hold_lock=False` is for callers (recovery) that already hold the append
+        # FileLock for the whole read-modify-write — re-acquiring it on a second fd
+        # would deadlock.
+        lock = FileLock(str(self.lock_path)) if hold_lock else contextlib.nullcontext()
+        with lock:
             state = load_state(self.state_dir)
             payload, policy_redacted = self._redact_payload(payload)
             sequence = state.sequence + 1

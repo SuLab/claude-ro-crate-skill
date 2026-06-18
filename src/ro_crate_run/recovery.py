@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
 from .events import compute_event_hash, event_from_dict
 from .journal import EventWriter
 from .models import RcrEvent
@@ -26,6 +28,15 @@ def is_active_run(events: list[Any]) -> bool:
 
 
 def recover_state(state_dir: Path, active_run: bool = False) -> RecoveryResult:
+    # Serialize the entire read-modify-write of the journal + state under the append
+    # FileLock. ensure_recovered() runs at every CLI startup, and real Claude sessions
+    # fire many hooks concurrently; without this lock a concurrent recovery's partial-line
+    # rewrite or state reconciliation races appends and corrupts the hash chain.
+    with FileLock(str(state_dir / "lock")):
+        return _recover_state_locked(state_dir, active_run)
+
+
+def _recover_state_locked(state_dir: Path, active_run: bool = False) -> RecoveryResult:
     result = RecoveryResult()
     raw_events, repaired_partial, repair_errors = _read_events_repairing_partial_line(state_dir)
     if repair_errors:
@@ -64,6 +75,7 @@ def recover_state(state_dir: Path, active_run: bool = False) -> RecoveryResult:
             "journal.repair.completed",
             {"reason": "state_lagged_journal"},
             source_kind="materializer",
+            hold_lock=False,
         )
         result.events.append(completed)
 
@@ -73,6 +85,7 @@ def recover_state(state_dir: Path, active_run: bool = False) -> RecoveryResult:
             "journal.repair.completed",
             {"reason": "partial_trailing_line_removed"},
             source_kind="materializer",
+            hold_lock=False,
         )
         result.repaired = True
         result.events.append(completed)
@@ -105,6 +118,7 @@ def recover_state(state_dir: Path, active_run: bool = False) -> RecoveryResult:
                     },
                     source_kind="materializer",
                     step_id=event.step_id,
+                    hold_lock=False,
                 )
                 result.repaired = True
                 result.events.append(blocked)
@@ -123,6 +137,7 @@ def _emit_repair_started(state_dir: Path, reason: str) -> None:
             "journal.repair.started",
             {"reason": reason},
             source_kind="materializer",
+            hold_lock=False,
         )
     except Exception:  # broad by design: repair helper must not raise
         pass
@@ -134,6 +149,7 @@ def _emit_repair_failed(state_dir: Path, reason: str) -> None:
             "journal.repair.failed",
             {"reason": reason},
             source_kind="materializer",
+            hold_lock=False,
         )
     except Exception:  # broad by design: repair helper must not raise
         pass
