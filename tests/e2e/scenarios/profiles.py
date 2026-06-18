@@ -131,8 +131,9 @@ SCENARIOS: list[ScenarioSpec] = [
             "flag:validate:--json",
             "entity:CreateAction", "entity:File", "entity:SoftwareApplication",
             "entity:Person", "entity:Dataset", "entity:Profile",
-            "action:object", "action:result", "action:instrument", "action:agent",
-            "action:actionStatus", "file:sha256", "profile:process", "mode:advisory",
+            "prop:action:object", "prop:action:result", "prop:action:instrument",
+            "prop:action:agent", "prop:action:actionStatus", "prop:file:sha256",
+            "profile:process", "mode:advisory",
         }),
         check=_check_proc_minimal,
         prompt=prescriptive_prompt(

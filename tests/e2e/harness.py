@@ -79,6 +79,11 @@ def _seed(workdir: Path, spec: ScenarioSpec) -> None:
         subprocess.run(["git", "init", "-q"], cwd=workdir, check=True)
         subprocess.run(["git", "config", "user.email", "e2e@test.local"], cwd=workdir, check=True)
         subprocess.run(["git", "config", "user.name", "e2e"], cwd=workdir, check=True)
+        # A remote URL so git provenance (#git/state remote) is exercised.
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://example.invalid/e2e-repo.git"],
+            cwd=workdir, check=True,
+        )
         if spec.git_commit and spec.seed_files:
             subprocess.run(["git", "add", "-A"], cwd=workdir, check=True)
             subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=workdir, check=True)

@@ -156,7 +156,7 @@ SCENARIOS: list[ScenarioSpec] = [
         append_system_prompt=STRICT_PREAMBLE,
         coverage_tags=frozenset({
             "cmd:config", "policy:lockfile-scan", "policy:include_git_diff",
-            "prop:git:branch", "prop:git:dirty", "entity:Thing",
+            "prop:git:branch", "prop:git:dirty", "prop:git:remote", "entity:Thing",
         }),
         check=_check_git,
         prompt=prescriptive_prompt(
