@@ -88,6 +88,10 @@ def assert_no_secret_leaks(result: ScenarioResult, needles: tuple) -> None:
 def assert_crate(result: ScenarioResult) -> None:
     """Standard per-crate validation battery from the design spec."""
     spec = result.spec
+    if spec.skip_crate_battery:
+        if spec.check:
+            spec.check(result.graph or [], result)
+        return
     assert result.graph is not None, \
         f"no crate emitted (claude_exit={result.claude_exit})\n{result.transcript[-2000:]}"
     assert_no_dangling_refs(result.graph)

@@ -143,6 +143,8 @@ def run_scenario(
     workdir = Path(tempfile.mkdtemp(prefix=f"rcr-e2e-{spec.name}-"))
     _seed(workdir, spec)
     env = build_env(workdir)
+    if spec.env:
+        env.update(spec.env)
     exit_code, transcript = launcher(spec, workdir, env)
 
     crate_path = workdir / CRATE_REL

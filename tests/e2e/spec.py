@@ -32,7 +32,11 @@ class ScenarioSpec:
     strict: bool = False
     expect_validation_status: tuple[str, ...] = ("passed", "warning")
     allow_blocked: bool = False                      # enforced scenarios
+    # Skip the standard crate battery and run only `check` (for recovery / blocked-export
+    # scenarios that assert journal state rather than a finished, valid crate).
+    skip_crate_battery: bool = False
     needles: tuple[str, ...] = ()                    # must NOT appear in a public crate
+    env: Optional[dict] = None                       # extra env vars for the claude session
     coverage_tags: frozenset[str] = field(default_factory=frozenset)
     # extra per-scenario assertions: check(graph, result) -> None, raises on failure
     check: Optional[Callable[[list, ScenarioResult], None]] = None
