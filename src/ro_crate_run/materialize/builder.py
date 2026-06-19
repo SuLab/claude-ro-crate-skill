@@ -289,7 +289,7 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
             file_ids.add(input_id)
 
     # --- Agent action families (SPEC §16: the Claude agent's actions ARE the workflow) ---
-    agent_action_entities = mapping.build_agent_actions(model, project_dir)
+    agent_action_entities = mapping.build_agent_actions(model, project_dir, file_ids)
     graph.extend(agent_action_entities)
     for e in agent_action_entities:
         types = e["@type"] if isinstance(e["@type"], list) else [e["@type"]]

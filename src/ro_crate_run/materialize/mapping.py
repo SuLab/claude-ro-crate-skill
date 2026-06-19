@@ -208,10 +208,16 @@ _FILE_OP_TYPE = {
 
 
 def build_file_actions(
-    model: RunModel, project_dir: os.PathLike[str] | str
+    model: RunModel,
+    project_dir: os.PathLike[str] | str,
+    emitted_file_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Emit a Create/Update/DeleteAction for every agent file edit (Write/Edit/…),
-    plus the tool SoftwareApplication used as the action instrument."""
+    plus the tool SoftwareApplication used as the action instrument.
+
+    Drops actions whose target File entity was suppressed by file policy
+    (ignored/sensitive/out-of-root) so result/object refs never dangle.
+    """
     entities: list[dict[str, Any]] = []
     seen_tools: set[str] = set()
     for fa in model.file_actions:
@@ -219,6 +225,10 @@ def build_file_actions(
         if not path:
             continue
         rel = _relative_id(path, project_dir)
+        # Only materialize the action if its target file became a File entity; otherwise
+        # the result/object ref would dangle (fail-safe: drop rather than dangle).
+        if emitted_file_ids is not None and rel not in emitted_file_ids:
+            continue
         tool = str(fa.get("tool_name") or "editor")
         tool_id = software_entity_id(tool)
         if tool_id not in seen_tools:
@@ -433,11 +443,13 @@ def build_phase_actions(model: RunModel) -> list[dict[str, Any]]:
 
 
 def build_agent_actions(
-    model: RunModel, project_dir: os.PathLike[str] | str
+    model: RunModel,
+    project_dir: os.PathLike[str] | str,
+    emitted_file_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate every agent-action family into crate entities (SPEC §16)."""
     entities: list[dict[str, Any]] = []
-    entities += build_file_actions(model, project_dir)
+    entities += build_file_actions(model, project_dir, emitted_file_ids)
     entities += build_raw_command_actions(model)
     entities += build_subagent_actions(model)
     entities += build_blocked_actions(model)

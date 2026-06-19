@@ -157,6 +157,11 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
             "file.created", "file.modified", "file.changed", "file.deleted",
         }:
             # An agent file edit (Write/Edit/MultiEdit/NotebookEdit, or an external FileChanged).
+            # Skip edits to the internal provenance store — they are tooling, not the agent's
+            # work product, and must not become workflow steps.
+            _fa_path = str(payload.get("path", ""))
+            if "/.ro-crate-run/" in _fa_path or _fa_path.startswith(".ro-crate-run/"):
+                continue
             model.file_actions.append({
                 "path": str(payload.get("path", "")),
                 "tool_name": str(payload.get("tool_name", "")),

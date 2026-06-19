@@ -96,7 +96,7 @@ class RcrConfig:
             "__pycache__/**",
             ".mypy_cache/**",
             ".pytest_cache/**",
-            ".ro-crate-run/staging/**",
+            ".ro-crate-run/**",
         ]
     )
     hash_policy: HashPolicy = field(default_factory=HashPolicy)
