@@ -53,8 +53,15 @@ LOCKFILE_NAMES = (
 )
 
 
-def start(title: str, mode: str, profile: str, no_checkpoint: bool = False) -> int:
-    ctx = ProjectContext.from_cwd()
+def _bootstrap_run(
+    ctx: ProjectContext, title: str, mode: str, profile: str,
+    *, source_kind: str = "skill_command",
+) -> Path:
+    """Create the .ro-crate-run state + emit run.started / environment.observed.
+
+    Shared by `rcr start` and hook auto-start so the agent's actions are captured
+    from the very first event, even when no human ran `rcr start`.
+    """
     state_dir = ctx.state_dir
     state_dir.mkdir(parents=True, exist_ok=True)
     ensure_runtime_dirs(state_dir)
@@ -100,7 +107,7 @@ def start(title: str, mode: str, profile: str, no_checkpoint: bool = False) -> i
     }
     if claude_meta:
         run_started_payload["claude"] = claude_meta
-    writer.append("run.started", run_started_payload, source_kind="skill_command")
+    writer.append("run.started", run_started_payload, source_kind=source_kind)
     writer.append(
         "environment.observed",
         {
@@ -114,11 +121,31 @@ def start(title: str, mode: str, profile: str, no_checkpoint: bool = False) -> i
             "os": platform.platform(),
             "privacy": cfg.privacy.__dict__,
         },
-        source_kind="skill_command",
+        source_kind=source_kind,
     )
+    return state_dir
+
+
+def start(title: str, mode: str, profile: str, no_checkpoint: bool = False) -> int:
+    ctx = ProjectContext.from_cwd()
+    state_dir = _bootstrap_run(ctx, title, mode, profile)
     if not no_checkpoint:
         return checkpoint(state_dir, requested_profile=profile)
     return 0
+
+
+def auto_start_run(env: dict[str, str] | None = None) -> bool:
+    """Bootstrap a run from a hook when none exists yet (opt-in via RCR_AUTO_START).
+
+    Returns True if a run was created. Lets the agent's actions be captured as the
+    workflow from session start even when no human ran `rcr start` (SPEC §16).
+    """
+    ctx = ProjectContext.from_cwd(env=env)
+    if (ctx.state_dir / "state.json").exists():
+        return False
+    title = ctx.project_dir.name or "Claude Code session"
+    _bootstrap_run(ctx, title, mode="advisory", profile="auto", source_kind="claude_hook")
+    return True
 
 
 def resume() -> int:

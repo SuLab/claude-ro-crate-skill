@@ -58,7 +58,19 @@ def handle_hook(
         payload.get("cwd") or env.get("CLAUDE_PROJECT_DIR") if env else None, env=env
     )
     if not (ctx.state_dir / "state.json").exists():
-        return HookResult()
+        # Auto-start (opt-in via RCR_AUTO_START): bootstrap a run on first activity so the
+        # agent's actions are captured as the workflow even without an explicit `rcr start`.
+        # Only on session/prompt/tool start, never on teardown events.
+        if event_name in {"SessionStart", "UserPromptSubmit", "PreToolUse"} and (env or {}).get(
+            "RCR_AUTO_START"
+        ):
+            from .commands import auto_start_run
+
+            if not auto_start_run(env=env):
+                return HookResult()
+            # A run now exists; fall through and handle this event normally.
+        else:
+            return HookResult()
     from .recovery import ensure_recovered
 
     ensure_recovered(ctx.state_dir)
