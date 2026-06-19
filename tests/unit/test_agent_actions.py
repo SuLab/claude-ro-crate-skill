@@ -93,3 +93,20 @@ def test_synthesized_workflow_weaves_agent_actions_as_steps(tmp_path: Path, monk
     wf_actions = [e for e in graph if (e.get("instrument") or {}).get("@id") == "#workflow/agent-actions"]
     assert wf_actions, "no action uses the workflow as instrument (L3)"
     assert wf_actions[0]["agent"]["@id"] == "#actor/claude-code"
+
+
+def test_rcr_tooling_is_not_a_raw_command(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The agent invokes rcr via its full skill path (Bash); that provenance tooling must
+    # NOT be materialized as a raw-command workflow step. A genuine raw command must.
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "T", "--mode", "advisory", "--profile", "auto", "--no-checkpoint"]) == 0
+    sd = tmp_path / ".ro-crate-run"
+    _append(sd, "tool.completed",
+            {"tool_name": "Bash", "tool_input": {"command": "/home/x/scripts/rcr checkpoint"}})
+    _append(sd, "tool.completed",
+            {"tool_name": "Bash", "tool_input": {"command": "wc -l data.csv"}})
+    assert main(["checkpoint"]) == 0
+    graph = json.loads((sd / "ro-crate" / "ro-crate-metadata.json").read_text())["@graph"]
+    raw = [str(e.get("name", "")) for e in graph if str(e.get("@id", "")).startswith("#raw-command/")]
+    assert any("wc -l" in n for n in raw), f"genuine raw command missing: {raw}"
+    assert not any("rcr" in n for n in raw), f"rcr tooling leaked as a raw-command: {raw}"

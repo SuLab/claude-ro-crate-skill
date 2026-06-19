@@ -227,9 +227,10 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
         elif event.event_type == "tool.completed":
             tool_name = str(payload.get("tool_name", ""))
             command = _bash_command(payload)
-            if tool_name == "Bash" and command and not command.strip().startswith("rcr "):
+            if tool_name == "Bash" and command and not _is_rcr_invocation(command):
                 # Substantive raw shell NOT wrapped in rcr run (rcr-wrapped commands are
-                # already captured as execution.command.* -> CommandRecord; skip them here).
+                # already captured as execution.command.* -> CommandRecord; rcr/hook
+                # provenance tooling is excluded so it never pollutes the workflow).
                 model.raw_commands.append({
                     "command": command,
                     "timestamp": event.timestamp,
@@ -271,6 +272,19 @@ def _bash_command(payload: dict[str, Any]) -> str:
     if isinstance(tool_input, dict):
         return str(tool_input.get("command", ""))
     return ""
+
+
+def _is_rcr_invocation(command: str) -> bool:
+    """True if a Bash command is rcr / a rocrate hook script — provenance tooling, not
+    the agent's work. Matches whether invoked as `rcr ...` or via a full skill path
+    (e.g. /…/scripts/rcr start) so it never becomes a raw-command workflow step."""
+    stripped = command.strip()
+    if not stripped:
+        return False
+    if "rocrate_" in stripped:
+        return True
+    first = stripped.split()[0]
+    return Path(first).name == "rcr"
 
 
 def _engine_for_path(path: str) -> str:
