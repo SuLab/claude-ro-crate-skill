@@ -76,6 +76,25 @@ def _has_status(action: dict, needle: str) -> bool:
     return bool(sid) and needle in sid
 
 
+_ACTION_TYPES = (
+    "Action", "CreateAction", "UpdateAction", "DeleteAction",
+    "ControlAction", "OrganizeAction", "AssessAction",
+)
+
+
+def _id_refs(value) -> list:  # type: ignore[no-untyped-def]
+    # Collect the @id of every {"@id": ...} reference in a scalar-or-list property value.
+    out: list = []
+    for cand in (value if isinstance(value, list) else [value]):
+        if isinstance(cand, dict) and cand.get("@id"):
+            out.append(cand["@id"])
+    return out
+
+
+def _is_action(entity: dict) -> bool:
+    return any(t in _types(entity) for t in _ACTION_TYPES)
+
+
 def _check_proc_minimal(graph: list, result) -> None:
     ids = entities_by_id(graph)
     assert "./" in ids, "missing root data entity"
@@ -116,6 +135,20 @@ def _check_proc_multi(graph: list, result) -> None:
     objects = [o for a in creates for o in (a.get("object") or [])]
     assert objects, "no CreateAction with an object (input)"
     assert all(o.get("@id") in ids for o in objects), "action object ref does not resolve"
+    # In-place modification: an UpdateAction whose object AND result reference the SAME file
+    # (the a.txt append). That shared object/result is the defining signature of editing a
+    # file in place rather than deriving a new output from a distinct input.
+    inplace = []
+    for u in by_type(graph, "UpdateAction"):
+        shared = {o.get("@id") for o in (u.get("object") or [])} & \
+                 {r.get("@id") for r in (u.get("result") or [])}
+        shared.discard(None)
+        if shared:
+            inplace.append((u, shared))
+    assert inplace, \
+        "no UpdateAction has the same file as both object and result (in-place modification)"
+    _, shared = inplace[0]
+    assert all(fid in ids for fid in shared), "in-place modified file ref does not resolve"
 
 
 def _check_proc_failed(graph: list, result) -> None:
@@ -126,7 +159,18 @@ def _check_proc_failed(graph: list, result) -> None:
 
 
 def _check_proc_delete(graph: list, result) -> None:
+    ids = entities_by_id(graph)
     assert_entity_type(graph, "DeleteAction", min_count=1)
+    # The DeleteAction must name its victim: object references the deleted file and resolves.
+    victims = [d for d in by_type(graph, "DeleteAction")
+               if any(o.get("@id") == "victim.txt" for o in (d.get("object") or []))]
+    assert victims, "no DeleteAction whose object references the deleted file victim.txt"
+    victim = victims[0]
+    assert all(o.get("@id") in ids for o in (victim.get("object") or [])), \
+        "DeleteAction object ref does not resolve to an emitted entity"
+    # A deletion produces nothing: result must be absent or empty.
+    assert not victim.get("result"), \
+        f"DeleteAction should produce no result, got {victim.get('result')!r}"
 
 
 def _check_workflow(graph: list, result) -> None:
@@ -143,6 +187,19 @@ def _check_wf_cwl(graph: list, result) -> None:
     assert_entity_type(graph, "PropertyValue", min_count=1)
     pvs = by_type(graph, "PropertyValue")
     assert any(p.get("exampleOfWork") for p in pvs), "no PropertyValue links exampleOfWork"
+    # FormalParameters carry their schema shape: an additionalType (the data type) and/or a
+    # valueRequired flag, not just a bare @type.
+    fps = by_type(graph, "FormalParameter")
+    assert any(("additionalType" in p) or ("valueRequired" in p) for p in fps), \
+        "no FormalParameter carries additionalType or valueRequired"
+    # A concrete File (data.txt) is tied to its abstract slot via exampleOfWork pointing at a
+    # FormalParameter — the workflow-profile link from instance data to the declared parameter.
+    fp_ids = {p["@id"] for p in fps}
+    file_eow = [
+        (f["@id"], r) for f in by_type(graph, "File")
+        for r in _id_refs(f.get("exampleOfWork")) if r in fp_ids
+    ]
+    assert file_eow, "no File entity carries exampleOfWork pointing at a FormalParameter"
 
 
 def _check_wf_steps(graph: list, result) -> None:
@@ -151,10 +208,42 @@ def _check_wf_steps(graph: list, result) -> None:
 
 
 def _check_provenance(graph: list, result) -> None:
+    ids = entities_by_id(graph)
     assert_entity_type(graph, "HowToStep", min_count=1)
     assert_entity_type(graph, "ControlAction", min_count=1)
     steps = by_type(graph, "HowToStep")
     assert any(s.get("workExample") for s in steps), "no HowToStep with workExample"
+    # A workflow-level action ties the whole run to the workflow: at least one action's
+    # instrument must resolve to the ComputationalWorkflow / #workflow/* entity.
+    cw_ids = {e["@id"] for e in by_type(graph, "ComputationalWorkflow")}
+
+    def _is_wf_ref(rid: str) -> bool:
+        return rid in cw_ids or rid.startswith("#workflow")
+
+    wf_actions = [
+        e for e in graph if _is_action(e)
+        and any(_is_wf_ref(r) for r in _id_refs(e.get("instrument")))
+    ]
+    assert wf_actions, "no workflow-level action whose instrument resolves to the workflow"
+    for a in wf_actions:
+        for r in _id_refs(a.get("instrument")):
+            if _is_wf_ref(r):
+                assert r in ids, f"workflow instrument {r!r} does not resolve"
+    # The step's workExample must resolve to a real SoftwareApplication, not dangle.
+    sw_ids = {e["@id"] for e in by_type(graph, "SoftwareApplication")}
+    assert any(r in sw_ids for s in steps for r in _id_refs(s.get("workExample"))), \
+        "no HowToStep workExample resolves to a SoftwareApplication"
+    # Each ControlAction orchestrates a concrete action: its object must resolve to an emitted
+    # action entity that itself reports a terminal actionStatus.
+    for ca in by_type(graph, "ControlAction"):
+        objs = _id_refs(ca.get("object"))
+        assert objs, f"ControlAction {ca.get('@id')!r} has no object"
+        for oid in objs:
+            target = ids.get(oid)
+            assert target is not None and _is_action(target), \
+                f"ControlAction object {oid!r} does not resolve to an emitted action entity"
+            assert target.get("actionStatus"), \
+                f"ControlAction target {oid!r} carries no actionStatus"
 
 
 SCENARIOS: list[ScenarioSpec] = [

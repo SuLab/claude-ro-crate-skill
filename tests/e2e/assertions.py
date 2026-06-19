@@ -88,6 +88,29 @@ def assert_no_secret_leaks(result: ScenarioResult, needles: tuple) -> None:
     assert leaks == [], f"public crate leaked: {leaks}"
 
 
+def assert_local_file_core_metadata(graph: list) -> None:
+    """If the crate embeds a concrete local data File (a real on-disk file, not an internal
+    sidecar under .ro-crate-run/ and not a remote/URI reference), at least one such File MUST
+    carry the core metadata a consumer needs: encodingFormat, contentSize, AND dateModified.
+    Reference-only crates are skipped (no embedded body to describe)."""
+    local_files = [
+        e for e in by_type(graph, "File")
+        if isinstance(e.get("@id"), str)
+        and not e["@id"].startswith((".ro-crate-run/", "http://", "https://", "urn:", "file:", "#"))
+    ]
+    if not local_files:
+        return
+    core = ("encodingFormat", "contentSize", "dateModified")
+    complete = [f for f in local_files if all(f.get(p) not in (None, "") for p in core)]
+    assert complete, (
+        f"no concrete local data File carries core metadata {core}; local Files present: "
+        + ", ".join(
+            f"{f['@id']}(missing {[p for p in core if f.get(p) in (None, '')]})"
+            for f in local_files
+        )
+    )
+
+
 def assert_crate(result: ScenarioResult) -> None:
     """Standard per-crate validation battery from the design spec."""
     spec = result.spec
@@ -104,6 +127,7 @@ def assert_crate(result: ScenarioResult) -> None:
     assert_no_dangling_refs(result.graph)
     assert_declared_io_reachable(result.graph)
     assert_descriptor(result.graph)
+    assert_local_file_core_metadata(result.graph)
     assert_valid(result, statuses=spec.expect_validation_status)
     if spec.expected_profile_uri:
         assert_profile(result.graph, spec.expected_profile_uri)

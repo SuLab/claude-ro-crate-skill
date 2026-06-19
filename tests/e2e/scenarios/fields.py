@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from tests.e2e.assertions import by_type, entities_by_id
 from tests.e2e.scenarios._common import (
     PROCESS_URI,
@@ -56,10 +58,36 @@ def _check_io_flags(graph: list, result) -> None:
 
 
 def _check_notes_decisions(graph: list, result) -> None:
-    # Public note + public decision -> CreativeWork entities (license/descriptor are also
-    # CreativeWork, so just assert a decision with rationale is present).
-    assert any(e.get("description") and str(e.get("@id", "")).startswith("#decision") for e in graph), \
+    # A public note (#note/*) is a distinct CreativeWork from any decision (#decision/*).
+    notes = [
+        e for e in graph
+        if str(e.get("@id", "")).startswith("#note/") and "CreativeWork" in _types(e)
+    ]
+    assert notes, "no public #note/* CreativeWork entity"
+    decisions = [
+        e for e in graph
+        if str(e.get("@id", "")).startswith("#decision/") and "CreativeWork" in _types(e)
+    ]
+    assert any(e.get("description") for e in decisions), \
         "no decision entity with rationale description"
+    note_ids = {n["@id"] for n in notes}
+    decision_ids = {d["@id"] for d in decisions}
+    assert note_ids and not (note_ids & decision_ids), \
+        "public note is not distinct from the decision entities"
+    # The PRIVATE note/decision text must never leak into the graph (redaction happens before
+    # persistence, so --private content stays out of the crate entirely).
+    blob = json.dumps(graph)
+    for secret in ("Private internal note", "Internal tradeoff", "kept for the record"):
+        assert secret not in blob, f"private text leaked into the graph: {secret!r}"
+    # The scenario runs `rcr reject`, which must surface as a failed AssessAction carrying an
+    # error (a FailedActionStatus action without an error would violate the L3 profile rule).
+    rejected = [
+        e for e in by_type(graph, "AssessAction")
+        if (e.get("actionStatus") or {}).get("@id", "").endswith("FailedActionStatus")
+    ]
+    assert rejected, "rcr reject did not produce a FailedActionStatus AssessAction"
+    assert all(e.get("error") for e in rejected), \
+        f"rejected AssessAction missing error: {rejected}"
 
 
 def _check_phase_open_warning(graph: list, result) -> None:
@@ -81,6 +109,21 @@ def _check_git(graph: list, result) -> None:
     assert req is not None, "requirements.txt dependency manifest not materialized"
     digest = (req.get("identifier") or {}).get("value", "")
     assert len(str(digest)) == 64, f"dependency manifest missing sha256: {req}"
+    # include_git_diff=always over a dirty tree must materialize the diff/patch as a File whose
+    # `about` points back at the git state, so the captured patch is reachable provenance.
+    diffs = [
+        e for e in graph
+        if "File" in _types(e) and (
+            e.get("encodingFormat") == "text/x-patch"
+            or (
+                str(e.get("@id", "")).startswith(".ro-crate-run/")
+                and str(e.get("@id", "")).endswith((".patch", ".diff"))
+            )
+        )
+    ]
+    assert diffs, "include_git_diff=always did not emit a git diff/patch File entity"
+    assert any((d.get("about") or {}).get("@id") == "#git/state" for d in diffs), \
+        f"git diff File does not point `about` at #git/state: {diffs}"
 
 
 def _check_journal_embedded(graph: list, result) -> None:
@@ -89,8 +132,34 @@ def _check_journal_embedded(graph: list, result) -> None:
 
 
 def _check_params_container(graph: list, result) -> None:
-    assert by_type(graph, "ParameterConnection"), "no ParameterConnection entity"
-    assert by_type(graph, "ContainerImage"), "no ContainerImage entity"
+    ids = entities_by_id(graph)
+    containers = by_type(graph, "ContainerImage")
+    assert containers, "no ContainerImage entity"
+    # `rcr container docker.io/library/python:3.12 --digest sha256:deadbeef` must split into
+    # registry/image/tag/sha256 with the EXACT expected values (the digest loses its algo prefix).
+    img = next(
+        (c for c in containers
+         if c.get("registry") == "docker.io" and c.get("tag") == "3.12"), None)
+    assert img is not None, \
+        f"no ContainerImage with registry docker.io / tag 3.12: {containers}"
+    assert img.get("name") == "library/python", \
+        f"ContainerImage name(image) {img.get('name')!r} != library/python"
+    assert img.get("sha256") == "deadbeef", \
+        f"ContainerImage sha256 {img.get('sha256')!r} != deadbeef"
+    # The connected parameter must produce a ParameterConnection whose source/target resolve
+    # to the declared #param/* FormalParameter entities.
+    conns = by_type(graph, "ParameterConnection")
+    assert conns, "no ParameterConnection entity"
+    conn = conns[0]
+    src = (conn.get("sourceParameter") or {}).get("@id")
+    tgt = (conn.get("targetParameter") or {}).get("@id")
+    assert src == "#param/raw", f"connection sourceParameter {src!r} != #param/raw"
+    assert tgt == "#param/clean", f"connection targetParameter {tgt!r} != #param/clean"
+    for pid in (src, tgt):
+        fp = ids.get(pid)
+        assert fp is not None, f"connection endpoint {pid!r} resolves to no entity"
+        assert "FormalParameter" in _types(fp), \
+            f"connection endpoint {pid!r} is not a FormalParameter: {_types(fp)}"
 
 
 SCENARIOS: list[ScenarioSpec] = [

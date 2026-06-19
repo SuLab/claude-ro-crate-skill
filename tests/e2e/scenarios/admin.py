@@ -62,9 +62,30 @@ def _check_export_blocked(graph: list, result) -> None:
 
 
 def _check_redact_applied(graph: list, result) -> None:
+    # Asserting the bookkeeping (backup + event) is not enough — prove the redaction actually
+    # rewrote the captured text: the token must be gone from every live published surface (the
+    # projected crate @graph and the live event journal) and the placeholder must be present.
+    # The pre-redaction-* backup is excluded from the scrub check (it is the retained original).
     backups = _glob(result, "events.ndjson.pre-redaction-*")
     assert backups, "redact --apply did not preserve a pre-redaction journal backup"
     assert _has_event(result, "redaction.applied"), "no redaction.applied event"
+
+    token = "ACME-9999"          # the exact id journaled by the scenario prompt
+    placeholder = "[REDACTED:secret]"
+
+    graph_blob = json.dumps(graph)
+    assert token not in graph_blob, (
+        f"redacted token {token!r} still present in the projected crate @graph; "
+        "redaction did not modify the published text"
+    )
+    assert placeholder in graph_blob, (
+        f"redaction placeholder {placeholder!r} not found in the crate @graph"
+    )
+    journal_blob = json.dumps(_journal(result))
+    assert token not in journal_blob, f"redacted token {token!r} still present in the live journal"
+    assert placeholder in journal_blob, (
+        f"redaction placeholder {placeholder!r} not found in the live event journal"
+    )
 
 
 def _check_finalized(graph: list, result) -> None:
