@@ -138,18 +138,26 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
             if eid not in exempt_ids:
                 findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
             continue
-        # Content integrity: a crate's recorded sha256 must match the bytes it points to.
-        # Re-hashing here catches post-checkpoint drift of referenced files and corruption
+        # Content integrity: a crate's recorded sha256 must match the bytes on disk.
+        # Re-hashing catches post-checkpoint drift of declared inputs/outputs and corruption
         # of embedded copies — without it, a stale/false hash passes validation silently.
-        if "File" in types and resolved.is_file():
+        # Both the embedded crate copy AND the live project file are checked: when an output
+        # is copied into the crate the embedded copy is immutable, so a tampered project-side
+        # file would otherwise be masked. Files exempt from presence checks (DeleteAction
+        # targets, remote/expected/missing/declared-only) are also exempt from content checks.
+        if "File" in types and eid not in exempt_ids:
             recorded = _recorded_sha256(entity)
-            if recorded is not None and sha256_file(resolved).replace("sha256:", "") != recorded:
-                findings.append(
-                    ValidationFinding(
-                        "ro_crate",
-                        "file_content_mismatch",
-                        f"Recorded sha256 does not match file content: {eid}",
-                        path=eid,
-                    )
-                )
+            if recorded is not None:
+                disk_paths = [crate_path, project_path] if crate_path != project_path else [crate_path]
+                for disk_path in disk_paths:
+                    if disk_path.is_file() and sha256_file(disk_path).replace("sha256:", "") != recorded:
+                        findings.append(
+                            ValidationFinding(
+                                "ro_crate",
+                                "file_content_mismatch",
+                                f"Recorded sha256 does not match file content: {eid}",
+                                path=eid,
+                            )
+                        )
+                        break
     return findings
