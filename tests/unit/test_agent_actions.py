@@ -65,6 +65,36 @@ def test_accept_reject_and_phases_materialize(tmp_path: Path, monkeypatch) -> No
     assert any(str(e.get("@id", "")).startswith("#phase/") for e in graph), "phase not materialized"
 
 
+def _status_prop(entity: dict):  # type: ignore[no-untyped-def]
+    ap = entity.get("additionalProperty")
+    for p in (ap if isinstance(ap, list) else [ap]):
+        if isinstance(p, dict) and p.get("propertyID") == "status":
+            return p.get("value")
+    return None
+
+
+def test_step_lifecycle_status_is_crate_visible(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A step start->end transition must be visible in the crate: the HowToStep carries a
+    # `status` additionalProperty and the controlling ControlAction carries actionStatus.
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "S", "--mode", "monitored", "--profile", "provenance", "--no-checkpoint"]) == 0
+    assert main(["step", "start", "done_step"]) == 0
+    assert main(["run", "--step", "done_step", "--", "python3", "-c", "print('x')"]) == 0
+    assert main(["step", "end", "done_step"]) == 0
+    assert main(["step", "start", "open_step"]) == 0  # left open
+    assert main(["checkpoint"]) == 0
+
+    graph = json.loads((tmp_path / ".ro-crate-run" / "ro-crate" / "ro-crate-metadata.json").read_text())["@graph"]
+    assert_no_dangling_refs(graph)
+    steps = {e.get("name"): e for e in graph if "HowToStep" in _types(e)}
+    assert _status_prop(steps["done_step"]) == "completed", "completed step not marked completed"
+    assert _status_prop(steps["open_step"]) == "started", "open step not marked started"
+    controls = [e for e in graph if "ControlAction" in _types(e)]
+    assert controls and any(
+        "Completed" in str((c.get("actionStatus") or {}).get("@id", "")) for c in controls
+    ), "ControlAction missing CompletedActionStatus for the finished step"
+
+
 def test_synthesized_workflow_weaves_agent_actions_as_steps(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     # An edit-only session (no rcr run): the synthesized workflow's steps ARE the agent's
     # file edits, in order, each linked via a ControlAction; a workflow-level action uses

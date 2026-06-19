@@ -7,7 +7,7 @@
         "python3 -c 'open('\"'\"'mid.txt'\"'\"','\"'\"'w'\"'\"').write('\"'\"'mid\\n'\"'\"')' [cmd_000007]"
       ],
       "result": [],
-      "status": null,
+      "status": "http://schema.org/CompletedActionStatus",
       "type": [
         "ControlAction"
       ]
@@ -19,7 +19,7 @@
         "python3 -c 'open('\"'\"'final.txt'\"'\"','\"'\"'w'\"'\"').write(open('\"'\"'mid.txt'\"'\"').read()+'\"'\"'done'\"'\"')' [cmd_000011]"
       ],
       "result": [],
-      "status": null,
+      "status": "http://schema.org/CompletedActionStatus",
       "type": [
         "ControlAction"
       ]
@@ -75,7 +75,7 @@
     "HowToStep": 2,
     "Person": 1,
     "Profile": 1,
-    "PropertyValue": 4,
+    "PropertyValue": 5,
     "SoftwareApplication": 7,
     "SoftwareSourceCode": 1
   },

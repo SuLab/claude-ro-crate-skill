@@ -767,9 +767,23 @@ def build_workflow_timeline(
     return entities, step_refs
 
 
+_STEP_STATUS_URI = {
+    "started": "http://schema.org/ActiveActionStatus",
+    "completed": "http://schema.org/CompletedActionStatus",
+    "failed": "http://schema.org/FailedActionStatus",
+    "skipped": "http://schema.org/FailedActionStatus",
+}
+
+
 def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
     """Emit a HowToStep for every step id, plus a ControlAction for steps with
-    a mapped command.  Guarantees no dangling step refs from build_workflow."""
+    a mapped command.  Guarantees no dangling step refs from build_workflow.
+
+    The step's lifecycle status (started/completed/failed/skipped) is projected so a
+    start→end transition is visible in the crate: as an `additionalProperty` on the
+    HowToStep (universal, even for steps with no command) and as the `actionStatus` of the
+    controlling ControlAction (which IS an Action).
+    """
     if not model.steps:
         return []
     cmd_by_step: dict[str, CommandRecord] = {}
@@ -779,7 +793,17 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     for step_id in sorted(model.steps):
         step_entity_id = idmap.entity_for_step(step_id)
-        howto: dict[str, Any] = {"@id": step_entity_id, "@type": "HowToStep", "name": step_id}
+        status = str(model.steps[step_id].get("status", "started"))
+        howto: dict[str, Any] = {
+            "@id": step_entity_id,
+            "@type": "HowToStep",
+            "name": step_id,
+            "additionalProperty": {
+                "@type": "PropertyValue",
+                "propertyID": "status",
+                "value": status,
+            },
+        }
         step_cmd: CommandRecord | None = cmd_by_step.get(step_id)
         if step_cmd and step_cmd.argv:
             howto["workExample"] = {"@id": software_entity_id(os.path.basename(step_cmd.argv[0]))}
@@ -791,6 +815,11 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
                     "@type": "ControlAction",
                     "instrument": {"@id": step_entity_id},
                     "object": {"@id": step_cmd.action_id},
+                    "actionStatus": {
+                        "@id": _STEP_STATUS_URI.get(
+                            status, "http://schema.org/CompletedActionStatus"
+                        )
+                    },
                 }
             )
     return entities
