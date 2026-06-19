@@ -67,10 +67,17 @@ def _IGNORE(_dir: str, names: list[str]) -> set[str]:
 
 
 def _hash_tree(root: Path) -> str:
-    """Stable hash of a source tree's contents (excludes bytecode caches)."""
+    """Stable hash of a source tree's contents.
+
+    Includes ANY file present — notably .pyc / __pycache__ — so a bypassPermissions agent
+    cannot evade tamper detection by poisoning a bytecode cache (which Python would import
+    in preference to the .py). Legitimate bytecode writes are suppressed by
+    PYTHONDONTWRITEBYTECODE=1 in `build_env`, so the snapshot has no .pyc at baseline and
+    any post-run .pyc is necessarily a plant.
+    """
     h = hashlib.sha256()
     for p in sorted(root.rglob("*")):
-        if "__pycache__" in p.parts or p.suffix in (".pyc", ".pyo") or not p.is_file():
+        if not p.is_file():
             continue
         h.update(str(p.relative_to(root)).encode())
         h.update(b"\0")
@@ -102,6 +109,9 @@ def build_env(workdir: Path, snapshot: Optional[Path] = None) -> dict:
     if snapshot is not None:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{snapshot}{os.pathsep}{existing}" if existing else str(snapshot)
+        # No bytecode caches in the snapshot, so a planted .pyc can't shadow a .py to evade
+        # the snapshot-integrity hash (which now includes .pyc). See _hash_tree.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     return env
 

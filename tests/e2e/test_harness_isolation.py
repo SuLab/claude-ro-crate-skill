@@ -89,6 +89,24 @@ def test_editing_the_snapshot_is_detected() -> None:
         _cleanup(res)
 
 
+def test_bytecode_cache_poisoning_is_detected() -> None:
+    # A rogue agent can't evade tamper detection by planting a poisoned .pyc that Python
+    # would import in preference to the .py: PYTHONDONTWRITEBYTECODE keeps the snapshot
+    # free of legit caches, and _hash_tree now hashes .pyc files too.
+    def launcher(spec: ScenarioSpec, workdir: Path, env: dict) -> tuple[int, str]:
+        assert env.get("PYTHONDONTWRITEBYTECODE") == "1", "bytecode writes not suppressed"
+        cache = _snapshot_dir(env) / "ro_crate_run" / "__pycache__"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "constants.cpython-312.pyc").write_bytes(b"poisoned-bytecode\x00")
+        return 0, "ok"
+
+    res = run_scenario(_SPEC, launcher=launcher)
+    try:
+        assert res.source_tampered is True, "planted .pyc evaded snapshot-integrity check"
+    finally:
+        _cleanup(res)
+
+
 def _cleanup(res: ScenarioResult) -> None:
     import shutil
 
