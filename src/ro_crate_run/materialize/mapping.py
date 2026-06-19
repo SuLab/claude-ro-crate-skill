@@ -695,25 +695,27 @@ def build_workflow_action(
         agent_id = "#actor/claude-code"
 
     wf_path = str(model.workflow.get("path", ""))
-    return [
-        {
-            "@id": workflow_action_id,
-            "@type": "CreateAction",
-            "name": f"Execute workflow for {model.title}",
-            "description": "Workflow-level execution action.",
-            "startTime": start_time,
-            "endTime": end_time,
-            "actionStatus": {"@id": workflow_status},
-            "agent": {"@id": agent_id},
-            "instrument": {"@id": wf_id},
-            "object": [
-                _ref(str(item["path"]))
-                for item in model.inputs
-                if str(item.get("path", "")) != wf_path
-            ],
-            "result": [_ref(str(item["path"])) for item in model.outputs],
-        }
-    ]
+    action: dict[str, Any] = {
+        "@id": workflow_action_id,
+        "@type": "CreateAction",
+        "name": f"Execute workflow for {model.title}",
+        "description": "Workflow-level execution action.",
+        "startTime": start_time,
+        "endTime": end_time,
+        "actionStatus": {"@id": workflow_status},
+        "agent": {"@id": agent_id},
+        "instrument": {"@id": wf_id},
+        "object": [
+            _ref(str(item["path"]))
+            for item in model.inputs
+            if str(item.get("path", "")) != wf_path
+        ],
+        "result": [_ref(str(item["path"])) for item in model.outputs],
+    }
+    if workflow_status.endswith("FailedActionStatus"):
+        # L3: a FailedActionStatus action must carry an error.
+        action["error"] = "One or more commands in the workflow failed; see the command actions."
+    return [action]
 
 
 # ---------------------------------------------------------------------------

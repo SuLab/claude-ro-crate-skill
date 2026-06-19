@@ -110,3 +110,20 @@ def test_rcr_tooling_is_not_a_raw_command(tmp_path: Path, monkeypatch) -> None: 
     raw = [str(e.get("name", "")) for e in graph if str(e.get("@id", "")).startswith("#raw-command/")]
     assert any("wc -l" in n for n in raw), f"genuine raw command missing: {raw}"
     assert not any("rcr" in n for n in raw), f"rcr tooling leaked as a raw-command: {raw}"
+
+
+def test_workflow_action_with_failed_command_carries_error(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A workflow run with a failed command -> the workflow-level action is
+    # FailedActionStatus and MUST carry an error (L3), so validation stays clean.
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "B", "--mode", "advisory", "--profile", "workflow", "--no-checkpoint"]) == 0
+    assert main(["run", "--", "python3", "-c", "import sys; sys.exit(3)"]) != 0
+    assert main(["run", "--", "python3", "-c", "print('ok')"]) == 0
+    assert main(["checkpoint"]) == 0
+    graph = json.loads((tmp_path / ".ro-crate-run" / "ro-crate" / "ro-crate-metadata.json").read_text())["@graph"]
+    wf_action = next(
+        e for e in graph
+        if str((e.get("instrument") or {}).get("@id", "")).startswith("#workflow/")
+        and "Failed" in str((e.get("actionStatus") or {}).get("@id", ""))
+    )
+    assert wf_action.get("error"), "failed workflow-level action missing error"

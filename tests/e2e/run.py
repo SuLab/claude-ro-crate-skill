@@ -17,14 +17,23 @@ import argparse  # noqa: E402
 import concurrent.futures  # noqa: E402
 import json  # noqa: E402
 import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
 import traceback  # noqa: E402
 
 from tests.e2e import assertions as A  # noqa: E402
 from tests.e2e import coverage  # noqa: E402
-from tests.e2e.harness import protect_repo, repo_source_dirty, run_scenario  # noqa: E402
+from tests.e2e.harness import (  # noqa: E402
+    _PROTECT_PATHS,
+    REPO_ROOT,
+    protect_repo,
+    repo_source_dirty,
+    run_scenario,
+)
 from tests.e2e.scenarios import ALL_SCENARIOS, by_area, by_name  # noqa: E402
 
 RESULTS = Path(__file__).resolve().parent / "results"
+_INTEGRITY_LOCK = threading.Lock()
 
 
 def _run_one(spec, model: str | None, keep: bool) -> dict:
@@ -41,6 +50,23 @@ def _run_one(spec, model: str | None, keep: bool) -> dict:
         rec["error"] = f"{type(exc).__name__}: {exc}"
         rec["trace"] = traceback.format_exc()
     finally:
+        # Integrity gate: a bypassPermissions agent can chmod-and-edit the source under
+        # test (the editable install) to make its own crate pass. If THIS scenario left
+        # the repo source dirty, its result is untrustworthy — fail it and revert so the
+        # tampering can't leak into other scenarios. Serialized so concurrent workers
+        # don't race the git checkout.
+        with _INTEGRITY_LOCK:
+            dirty = repo_source_dirty()
+            if dirty:
+                rec["ok"] = False
+                rec["tampered"] = dirty
+                rec["error"] = "TAMPERED: agent modified source under test: " + "; ".join(
+                    dirty.splitlines()[:3]
+                )
+                subprocess.run(
+                    ["git", "-C", str(REPO_ROOT), "checkout", "--", *_PROTECT_PATHS],
+                    capture_output=True, text=True,
+                )
         if result is not None:
             if keep:
                 rec["workdir"] = str(result.workdir)
