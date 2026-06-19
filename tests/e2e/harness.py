@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
@@ -14,6 +16,7 @@ from tests.e2e.spec import ScenarioResult, ScenarioSpec
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENV_BIN = REPO_ROOT / ".venv" / "bin"
 RCR = VENV_BIN / "rcr"
+SRC_PKG = REPO_ROOT / "src" / "ro_crate_run"
 CRATE_REL = Path(".ro-crate-run") / "ro-crate" / "ro-crate-metadata.json"
 
 Launcher = Callable[[ScenarioSpec, Path, dict], "tuple[int, str]"]
@@ -59,11 +62,46 @@ def repo_source_dirty() -> str:
     return proc.stdout.strip()
 
 
-def build_env(workdir: Path) -> dict:
-    """Environment that makes the skill `rcr` + hooks resolve to the editable repo src."""
+def _IGNORE(_dir: str, names: list[str]) -> set[str]:
+    return {n for n in names if n == "__pycache__" or n.endswith((".pyc", ".pyo"))}
+
+
+def _hash_tree(root: Path) -> str:
+    """Stable hash of a source tree's contents (excludes bytecode caches)."""
+    h = hashlib.sha256()
+    for p in sorted(root.rglob("*")):
+        if "__pycache__" in p.parts or p.suffix in (".pyc", ".pyo") or not p.is_file():
+            continue
+        h.update(str(p.relative_to(root)).encode())
+        h.update(b"\0")
+        h.update(p.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def snapshot_source() -> tuple[Path, str]:
+    """Copy the `ro_crate_run` package into a throwaway dir and return (parent, hash).
+
+    The scenario env points PYTHONPATH here, so the agent's `rcr`, the skill scripts,
+    and the plugin hooks all import THIS copy (the editable `.pth` and `_bootstrap`'s
+    bare-import probe both yield to PYTHONPATH). A bypassPermissions agent therefore
+    cannot make its own crate pass by editing the repo's `src/` — that source is never
+    imported. If the agent instead edits the snapshot it ran against, the post-run hash
+    won't match this baseline and the scenario is failed (see `run_scenario`).
+    """
+    snap = Path(tempfile.mkdtemp(prefix="rcr-e2e-src-"))
+    shutil.copytree(SRC_PKG, snap / "ro_crate_run", ignore=_IGNORE)
+    return snap, _hash_tree(snap / "ro_crate_run")
+
+
+def build_env(workdir: Path, snapshot: Optional[Path] = None) -> dict:
+    """Environment that makes the skill `rcr` + hooks resolve to an isolated src snapshot."""
     env = dict(os.environ)
     env["PATH"] = f"{VENV_BIN}:{env.get('PATH', '')}"
     env["CLAUDE_PROJECT_DIR"] = str(workdir)
+    if snapshot is not None:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{snapshot}{os.pathsep}{existing}" if existing else str(snapshot)
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     return env
 
@@ -141,27 +179,34 @@ def run_scenario(
         spec = ScenarioSpec(**{**spec.__dict__, "model": model})
     launcher = launcher or claude_launcher
     workdir = Path(tempfile.mkdtemp(prefix=f"rcr-e2e-{spec.name}-"))
-    _seed(workdir, spec)
-    env = build_env(workdir)
-    if spec.env:
-        env.update(spec.env)
-    exit_code, transcript = launcher(spec, workdir, env)
+    snapshot, baseline_hash = snapshot_source()
+    try:
+        _seed(workdir, spec)
+        env = build_env(workdir, snapshot=snapshot)
+        if spec.env:
+            env.update(spec.env)
+        exit_code, transcript = launcher(spec, workdir, env)
 
-    crate_path = workdir / CRATE_REL
-    graph = None
-    if crate_path.exists():
-        try:
-            graph = json.loads(crate_path.read_text())["@graph"]
-        except (json.JSONDecodeError, KeyError):
-            graph = None
+        crate_path = workdir / CRATE_REL
+        graph = None
+        if crate_path.exists():
+            try:
+                graph = json.loads(crate_path.read_text())["@graph"]
+            except (json.JSONDecodeError, KeyError):
+                graph = None
 
-    validate_json = rcr_json(["validate", "--json"], workdir, env)
-    status_json = rcr_json(["status", "--json"], workdir, env)
+        validate_json = rcr_json(["validate", "--json"], workdir, env)
+        status_json = rcr_json(["status", "--json"], workdir, env)
+        # The snapshot is the code that actually ran; if it changed, the agent edited
+        # the code under test and this scenario's crate is untrustworthy.
+        tampered = _hash_tree(snapshot / "ro_crate_run") != baseline_hash
+    finally:
+        shutil.rmtree(snapshot, ignore_errors=True)
 
     return ScenarioResult(
         spec=spec, workdir=workdir,
         crate_path=crate_path if crate_path.exists() else None,
         graph=graph, transcript=transcript,
         validate_json=validate_json, status_json=status_json,
-        claude_exit=exit_code,
+        claude_exit=exit_code, source_tampered=tampered,
     )

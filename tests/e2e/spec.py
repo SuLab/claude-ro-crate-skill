@@ -55,3 +55,7 @@ class ScenarioResult:
     validate_json: Optional[dict]
     status_json: Optional[dict]
     claude_exit: int
+    # True if the agent edited the per-scenario source snapshot that actually ran
+    # (the code under test). A local, per-scenario integrity signal — unlike the global
+    # repo-dirty check it cannot be tripped by a *different* scenario's tampering.
+    source_tampered: bool = False

@@ -88,6 +88,10 @@ def assert_no_secret_leaks(result: ScenarioResult, needles: tuple) -> None:
 def assert_crate(result: ScenarioResult) -> None:
     """Standard per-crate validation battery from the design spec."""
     spec = result.spec
+    assert not result.source_tampered, (
+        "agent edited the source snapshot under test (the code that produced this crate); "
+        "results are untrustworthy"
+    )
     if spec.skip_crate_battery:
         if spec.check:
             spec.check(result.graph or [], result)

@@ -44,25 +44,24 @@ def _run_one(spec, model: str | None, keep: bool) -> dict:
         result = run_scenario(spec, model=model)
         rec["claude_exit"] = result.claude_exit
         rec["validation_status"] = (result.validate_json or {}).get("status")
+        rec["source_tampered"] = result.source_tampered
+        # assert_crate fails the scenario if result.source_tampered — the per-scenario,
+        # snapshot-local trust gate. Unlike the old global repo-dirty check it can't be
+        # tripped by a *different* concurrent scenario's tampering (no cross-contamination).
         A.assert_crate(result)
         rec["ok"] = True
     except Exception as exc:
         rec["error"] = f"{type(exc).__name__}: {exc}"
         rec["trace"] = traceback.format_exc()
     finally:
-        # Integrity gate: a bypassPermissions agent can chmod-and-edit the source under
-        # test (the editable install) to make its own crate pass. If THIS scenario left
-        # the repo source dirty, its result is untrustworthy — fail it and revert so the
-        # tampering can't leak into other scenarios. Serialized so concurrent workers
-        # don't race the git checkout.
+        # Defense in depth: each scenario ran against an isolated source snapshot
+        # (PYTHONPATH), so editing the repo's src/ is inert — it's never imported. Revert
+        # any stray repo edit anyway to keep the developer's tree clean, and record it for
+        # the report. This does NOT fail the scenario; trust is gated on source_tampered.
         with _INTEGRITY_LOCK:
             dirty = repo_source_dirty()
             if dirty:
-                rec["ok"] = False
-                rec["tampered"] = dirty
-                rec["error"] = "TAMPERED: agent modified source under test: " + "; ".join(
-                    dirty.splitlines()[:3]
-                )
+                rec["repo_touched"] = dirty
                 subprocess.run(
                     ["git", "-C", str(REPO_ROOT), "checkout", "--", *_PROTECT_PATHS],
                     capture_output=True, text=True,
@@ -105,17 +104,30 @@ def main(argv: list | None = None) -> int:
                 print(f"[{mark}] {rec['name']:24s} exit={rec['claude_exit']} "
                       f"valid={rec['validation_status']} {rec['error'] or ''}")
 
-    # Only changes that appeared DURING the run indicate an agent escaped isolation
-    # (pre-existing uncommitted edits of our own are ignored).
+    # Per-scenario reverts keep the repo clean; this should be empty. A non-empty value
+    # means a revert lost a race — surfaced, but agent edits to repo src are inert anyway
+    # (each scenario imported its own isolated snapshot, not the repo).
     dirty = "\n".join(sorted(set(repo_source_dirty().splitlines()) - before))
     if dirty:
-        print("\n*** REPO SOURCE MODIFIED DURING RUN (an agent escaped isolation) ***")
+        print("\n*** REPO SOURCE STILL DIRTY AT SUITE END (reverting) ***")
         print(dirty)
+        subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "checkout", "--", *_PROTECT_PATHS],
+            capture_output=True, text=True,
+        )
+    touched = sorted(r["name"] for r in records if r.get("repo_touched"))
+    if touched:
+        print(f"\n*** {len(touched)} scenario(s) edited repo src (inert, reverted): {touched} ***")
+    tampered = sorted(r["name"] for r in records if r.get("source_tampered"))
+    if tampered:
+        print(f"\n*** {len(tampered)} scenario(s) tampered with their source snapshot: {tampered} ***")
 
     passed = [r for r in records if r["ok"]]
     report: dict = {
         "total": len(records), "passed": len(passed), "failed": len(records) - len(passed),
         "records": sorted(records, key=lambda r: r["name"]),
+        "repo_touched": touched,
+        "snapshot_tampered": tampered,
     }
     coverage_gap: list = []
     if not args.name and not args.area and not args.no_coverage:
