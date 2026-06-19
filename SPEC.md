@@ -1406,6 +1406,37 @@ materializer synthesizes the main workflow from the agent's actions:
 An external definition, when declared (role `workflow-definition`), is used as-is and is
 never overwritten by synthesis.
 
+### 16.6 Agent action materialization
+
+"All Claude agent actions are the workflow" is taken literally: every captured agent
+action is projected into the crate, not merely journaled. The reducer
+(`materialize/run_model.py`) populates a `RunModel` field per family and
+`materialize/mapping.py::build_agent_actions` emits crate entities:
+
+| Agent action (journal event)                         | Crate entity |
+|------------------------------------------------------|--------------|
+| File write/edit (`file.created/modified/changed/deleted`) | `CreateAction` / `UpdateAction` / `DeleteAction`, `agent` = the Claude agent, `instrument` = the Write/Edit tool `SoftwareApplication`, `result`/`object` = a real `File` entity copied into the crate |
+| `rcr run` command (`execution.command.*`)            | `CreateAction`/`UpdateAction`/`DeleteAction`/`Action` (existing) |
+| Substantive raw Bash, not via `rcr run` (`tool.completed`) | `CreateAction` (rcr-wrapped Bash is excluded to avoid double counting) |
+| Subagent / Task dispatch (`agent.task.*`, `agent.subagent.*`) | `OrganizeAction` per dispatch |
+| Blocked tool call / denied permission (`tool.blocked`, `permission.denied`) | `Action` with `FailedActionStatus` + `error` |
+| User prompt (`human.prompt`)                         | `CreativeWork` (instruction provenance; redaction applied at capture) |
+| Other tool uses (`tool.completed`, non-Bash)         | one `Action` per tool, with a usage count |
+| Housekeeping (`environment.cwd.changed`, `git.worktree.*`, `conversation.compaction.*`) | `Action` |
+| Result accept/reject (`human.accepted_result`/`rejected_result`) | `AssessAction` (`Completed`/`Failed` status) |
+| Phase (`workflow.phase.*`)                           | `OrganizeAction` grouping |
+
+Profile selection (`select_profile`) counts file edits, raw commands, and subagent
+dispatches as structured work, so an edit-driven session — even with zero `rcr run`
+commands — is a Workflow Run Crate whose `mainEntity` is the synthesized agent workflow.
+
+### 16.7 Auto-start
+
+So that actions are captured as the workflow from the first event rather than only after
+a human runs `rcr start`, hooks bootstrap a run on first activity (`SessionStart` /
+`UserPromptSubmit` / `PreToolUse`) when no run exists and `RCR_AUTO_START` is set. The
+opt-in env var keeps capture from polluting every project the agent opens.
+
 ### 16.4 Profile selection event
 
 The materializer MUST record profile selection:
