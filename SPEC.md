@@ -1340,7 +1340,7 @@ Requirements:
 
 ### 15.11 Environment, containers, and dependencies
 
-Represent environment variables as `PropertyValue` entities only when allowlisted and relevant.
+Represent environment variables as `PropertyValue` entities only when allowlisted and relevant. The `redaction.environment_allowlist` governs which variables may ever be captured (everything else is redacted out of captured command environments); the host environment is deliberately NOT auto-snapshotted into the crate, since doing so would make the output host-dependent (and non-reproducible) and risks leaking host-specific paths. A `#env/<NAME>` `PropertyValue` is therefore emitted only when an allowlisted variable is explicitly provided to the run model, never proactively from `os.environ`.
 
 Represent container images with workflow-run `ContainerImage` where available:
 
