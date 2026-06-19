@@ -10,6 +10,8 @@ module only needs to import/parse cleanly and register in ``ALL_SCENARIOS``.
 """
 from __future__ import annotations
 
+import json
+
 from tests.e2e.assertions import by_type, entities_by_id
 from tests.e2e.scenarios._common import STRICT_PREAMBLE, prescriptive_prompt
 from tests.e2e.spec import ScenarioSpec, SeedFile
@@ -29,9 +31,28 @@ def _check_raw_bash(graph: list, result) -> None:
     assert raw, "no #raw-command/* CreateAction (raw Bash command not captured)"
     assert any("CreateAction" in _types(e) for e in raw), \
         f"#raw-command present but not a CreateAction: {[_types(e) for e in raw]}"
-    # The synthesized agent-actions workflow should be the crate's mainEntity.
+    # Two raw commands -> structured agent work -> synthesized workflow as mainEntity.
     root = entities_by_id(graph).get("./", {})
     assert root.get("mainEntity"), "root missing mainEntity (no synthesized workflow)"
+
+
+def _journal_events(result) -> list:
+    p = result.workdir / ".ro-crate-run" / "events.ndjson"
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+
+
+def _check_auto_start(graph: list, result) -> None:
+    # The run was bootstrapped by a hook (RCR_AUTO_START), not by an explicit `rcr start`.
+    events = _journal_events(result)
+    started = [e for e in events if e.get("event_type") == "run.started"]
+    assert started, "no run.started — auto-start did not bootstrap a run"
+    assert any(
+        (e.get("source") or {}).get("kind") == "claude_hook" for e in started
+    ), "run.started was not emitted by a hook (auto-start path not taken)"
+    # And the agent's edit was still materialized.
+    assert _by_prefix(graph, "#file-action/"), "auto-started run captured no file edits"
 
 
 def _check_file_edit(graph: list, result) -> None:
@@ -64,23 +85,35 @@ SCENARIOS: list[ScenarioSpec] = [
         name="agent-raw-bash",
         area="natural",
         seed_files=(SeedFile("data.csv", "a,b\n1,2\n3,4\n"),),
-        append_system_prompt=STRICT_PREAMBLE,
         coverage_tags=frozenset({
-            "feature:raw-bash-action", "feature:auto-start",
-            "entity:CreateAction",
+            "feature:raw-bash-action", "entity:CreateAction",
         }),
         check=_check_raw_bash,
-        prompt=prescriptive_prompt(
-            "Capture provenance of inspecting a CSV with a raw shell command. Run the "
-            "wc command DIRECTLY via the Bash tool (do NOT wrap it in rcr run); rcr will "
-            "still record it as a raw-command action.",
-            [
-                'rcr start "Agent raw bash" --mode advisory --profile auto',
-                "rcr input data.csv --role dataset",
-                "wc -l data.csv",
-                "rcr checkpoint",
-                "rcr validate --json",
-            ],
+        prompt=(
+            "You are capturing provenance with the ro-crate-run skill. Steps, in order:\n"
+            "1. Run: rcr start \"Agent raw bash\" --mode advisory --profile auto\n"
+            "2. Run: rcr input data.csv --role dataset\n"
+            "3. Using the Bash tool, run this shell command DIRECTLY (do NOT wrap it in "
+            "rcr run): wc -l data.csv\n"
+            "4. Using the Bash tool, run this shell command DIRECTLY (do NOT wrap it in "
+            "rcr run): head -1 data.csv\n"
+            "5. Run: rcr checkpoint\n"
+            "6. Run: rcr validate --json\n"
+            "The two raw shell commands are the point — run them directly via the Bash tool."
+        ),
+    ),
+    ScenarioSpec(
+        name="agent-auto-start",
+        area="natural",
+        env={"RCR_AUTO_START": "1"},
+        seed_files=(SeedFile("data.txt", "hello\n"),),
+        coverage_tags=frozenset({"feature:auto-start"}),
+        check=_check_auto_start,
+        prompt=(
+            "Provenance capture is enabled automatically for this session — do NOT run "
+            "'rcr start'. Using the Edit tool, append a line 'world' to data.txt. Then "
+            "finalize the provenance crate by running: rcr checkpoint, then "
+            "rcr validate --json. Use the bundled rcr CLI for those two commands."
         ),
     ),
     ScenarioSpec(
