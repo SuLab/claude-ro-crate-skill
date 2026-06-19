@@ -142,3 +142,42 @@ def test_duplicate_start_does_not_clobber_active_run(tmp_path: Path, monkeypatch
     result = recover_state(state_dir)
     assert result.fatal is False
     assert "journal.repair.failed" not in [e.event_type for e in result.events]
+
+
+def test_duplicate_start_does_not_retarget_profile(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A duplicate `rcr start --profile X` on an active run must NOT silently re-target the
+    # run's profile via the implicit checkpoint — that can flip validation to failed.
+    from ro_crate_run.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "P", "--mode", "advisory", "--profile", "auto", "--no-checkpoint"]) == 0
+    state_dir = tmp_path / ".ro-crate-run"
+    before = load_state(state_dir).requested_profile
+    # Duplicate start asking for a different profile — must be ignored.
+    assert main(["start", "P", "--mode", "advisory", "--profile", "provenance"]) == 0
+    assert load_state(state_dir).requested_profile == before, "duplicate start leaked --profile"
+
+
+def test_start_after_terminal_event_archives_and_starts_clean(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # `rcr start` after a TERMINAL event (run.aborted/finalized) must NOT append a fresh
+    # sequence-1 event onto the old journal (that breaks the hash chain). It archives the
+    # closed run and bootstraps a brand-new, clean chain.
+    from ro_crate_run.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Run1", "--mode", "advisory", "--profile", "auto", "--no-checkpoint"]) == 0
+    state_dir = tmp_path / ".ro-crate-run"
+    first_run_id = load_state(state_dir).run_id
+    EventWriter(state_dir).append("human.note", {"text": "x"}, source_kind="human_cli")
+    assert main(["abort", "done"]) == 0  # terminal event
+
+    assert main(["start", "Run2", "--mode", "advisory", "--profile", "auto", "--no-checkpoint"]) == 0
+    # New run: fresh monotonic chain starting at 1, different run_id, no fatal recovery.
+    seqs = [e["sequence"] for e in read_events(state_dir)]
+    assert seqs == sorted(seqs) and seqs[0] == 1, f"chain not fresh/monotonic: {seqs}"
+    assert load_state(state_dir).run_id != first_run_id, "new run reused the closed run_id"
+    result = recover_state(state_dir)
+    assert result.fatal is False
+    # The closed run was preserved under archive/<run_id>/.
+    archive = state_dir / "archive" / first_run_id
+    assert (archive / "events.ndjson").exists(), "closed run not archived"

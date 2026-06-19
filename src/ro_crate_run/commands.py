@@ -127,25 +127,66 @@ def _bootstrap_run(
     return state_dir
 
 
+def _archive_closed_run(state_dir: Path) -> str:
+    """Relocate a closed run's journal/state so a fresh `rcr start` gets a clean chain.
+
+    A terminal run's events.ndjson must never receive a freshly-bootstrapped sequence-1
+    event appended onto it — EventWriter.append always opens the file in append mode and
+    derives sequence/previous_event_hash from the just-reset state, which produces a
+    non-monotonic sequence and a broken hash chain. So the prior run's core files are moved
+    into `.ro-crate-run/archive/<run_id>/` (inert: file inclusion ignores `.ro-crate-run/**`)
+    before bootstrapping. Returns the archived run_id (best-effort).
+    """
+    try:
+        run_id = load_state(state_dir).run_id
+    except Exception:
+        run_id = "closed-run"
+    dest = state_dir / "archive" / run_id
+    base = dest
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = base.parent / f"{base.name}.{n}"
+    dest.mkdir(parents=True, exist_ok=True)
+    # Move the chain/state files AND the derived crate output so the new run starts truly
+    # fresh (no stale crate that `rcr validate` would mistake for the new run's output).
+    for name in ("events.ndjson", "state.json", "id-map.json", "ro-crate"):
+        src = state_dir / name
+        if src.exists():
+            shutil.move(str(src), str(dest / name))
+    return run_id
+
+
 def start(title: str, mode: str, profile: str, no_checkpoint: bool = False) -> int:
     ctx = ProjectContext.from_cwd()
-    # SPEC §9.3: state.json / events.ndjson are created "if absent". If a run is already
-    # active, a second `rcr start` MUST NOT clobber state.json with a fresh initial_state —
-    # that orphans the existing journal (new run_id + reset sequence) and breaks the hash
-    # chain (non-monotonic sequence, previous-hash mismatch). Treat a duplicate start as
-    # idempotent: reconcile state from the authoritative journal and (optionally)
-    # checkpoint the existing run instead of corrupting it.
-    if (ctx.state_dir / "state.json").exists() and is_active_run(read_events(ctx.state_dir)):
-        ensure_recovered(ctx.state_dir)
-        existing = load_state(ctx.state_dir)
+    # SPEC §9.3: state.json / events.ndjson are created "if absent". A second `rcr start`
+    # MUST NOT clobber an existing run's state with a fresh initial_state — that orphans the
+    # journal (new run_id + reset sequence) and breaks the hash chain (non-monotonic
+    # sequence, previous-hash mismatch). Two cases when state.json already exists:
+    if (ctx.state_dir / "state.json").exists():
+        if is_active_run(read_events(ctx.state_dir)):
+            # (a) Run still active: idempotent. Reconcile from the authoritative journal and
+            #     checkpoint the EXISTING run. Pass "auto" — NOT the new --profile — so a
+            #     duplicate start can't silently re-target the run's profile (which would
+            #     flip validation). All args of the duplicate start are effectively ignored.
+            ensure_recovered(ctx.state_dir)
+            existing = load_state(ctx.state_dir)
+            print(
+                f"A run is already active ({existing.run_id}); ignoring duplicate 'rcr start'. "
+                "Use 'rcr resume' to continue or 'rcr abort' to end it first.",
+                file=sys.stderr,
+            )
+            if not no_checkpoint:
+                return checkpoint(ctx.state_dir, requested_profile="auto")
+            return 0
+        # (b) Prior run is closed (finalized/aborted). Archive it so the new run starts on a
+        #     clean hash chain instead of appending a fresh sequence onto the old journal.
+        archived = _archive_closed_run(ctx.state_dir)
         print(
-            f"A run is already active ({existing.run_id}); ignoring duplicate 'rcr start'. "
-            "Use 'rcr resume' to continue or 'rcr abort' to end it first.",
+            f"Previous run ({archived}) is closed; archived it under "
+            ".ro-crate-run/archive/ and starting a new run.",
             file=sys.stderr,
         )
-        if not no_checkpoint:
-            return checkpoint(ctx.state_dir, requested_profile=profile)
-        return 0
     state_dir = _bootstrap_run(ctx, title, mode, profile)
     if not no_checkpoint:
         return checkpoint(state_dir, requested_profile=profile)
