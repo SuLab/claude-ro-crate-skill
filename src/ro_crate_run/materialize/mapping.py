@@ -317,10 +317,11 @@ def build_blocked_actions(model: RunModel) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     for b in model.blocked_actions:
         reason = str(b.get("reason") or "blocked")
+        label = "Failed" if b.get("kind") == "tool-failed" else "Blocked"
         entities.append({
             "@id": f"#blocked/{b.get('sequence')}",
             "@type": "Action",
-            "name": f"Blocked: {b.get('tool_name') or b.get('kind') or 'action'}",
+            "name": f"{label}: {b.get('tool_name') or b.get('kind') or 'action'}",
             "description": reason,
             "startTime": b.get("timestamp"),
             "endTime": b.get("timestamp"),

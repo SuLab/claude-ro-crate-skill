@@ -195,6 +195,16 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
                 "sequence": event.sequence,
                 "kind": "permission",
             })
+        elif event.event_type == "tool.failed":
+            model.blocked_actions.append({
+                "tool_name": str(payload.get("tool_name", "")),
+                "reason": str(
+                    payload.get("error") or payload.get("message") or "tool use failed"
+                ),
+                "timestamp": event.timestamp,
+                "sequence": event.sequence,
+                "kind": "tool-failed",
+            })
         elif event.event_type in {
             "agent.task.created", "agent.task.completed",
             "agent.subagent.started", "agent.subagent.completed",
@@ -235,6 +245,7 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
         elif event.event_type in {
             "environment.cwd.changed", "git.worktree.created", "git.worktree.removed",
             "conversation.compaction.started", "conversation.compaction.completed",
+            "tool.batch.completed", "permission.requested",
         }:
             model.housekeeping.append({
                 "event": event.event_type,
