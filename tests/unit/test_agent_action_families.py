@@ -232,3 +232,68 @@ def test_housekeeping_cwd_change_materializes_action(tmp_path: Path, monkeypatch
     assert "Action" in _types(action), f"expected Action; types={_types(action)}"
     _assert_action_shape(action)
     assert action.get("agent", {}).get("@id") == "#actor/claude-code"
+
+
+def test_housekeeping_all_subtypes_materialize(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # worktree create/remove, conversation compaction, tool-batch, permission-requested all
+    # funnel into #housekeeping Actions — the CLI lifecycle events the e2e harness cannot
+    # naturally provoke.
+    monkeypatch.chdir(tmp_path)
+    sd = _start(tmp_path)
+    for etype, payload in [
+        ("git.worktree.created", {"path": "/tmp/wt"}),
+        ("git.worktree.removed", {"path": "/tmp/wt"}),
+        ("conversation.compaction.started", {}),
+        ("conversation.compaction.completed", {}),
+        ("tool.batch.completed", {"count": 4}),
+        ("permission.requested", {"tool_name": "Bash"}),
+    ]:
+        _append(sd, etype, payload)
+    assert main(["checkpoint"]) == 0
+
+    graph = _graph(sd)
+    assert_no_dangling_refs(graph)
+    hk = _by_prefix(graph, "#housekeeping/")
+    assert len(hk) >= 6, f"expected a #housekeeping Action per event, got {len(hk)}"
+    names = {str(e.get("name", "")) for e in hk}
+    assert any("worktree" in n for n in names), f"worktree housekeeping missing: {names}"
+    assert any("compaction" in n for n in names), f"compaction housekeeping missing: {names}"
+    assert any("batch" in n for n in names), f"tool.batch housekeeping missing: {names}"
+
+
+def test_permission_denied_and_tool_failed_materialize_blocked(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The OTHER two #blocked kinds beyond a policy block: a denied permission and a tool
+    # that errored. Both -> FailedActionStatus + error.
+    monkeypatch.chdir(tmp_path)
+    sd = _start(tmp_path)
+    _append(sd, "permission.denied", {"tool_name": "Write", "reason": "user denied the write"})
+    _append(sd, "tool.failed", {"tool_name": "Edit", "error": "could not apply edit"})
+    assert main(["checkpoint"]) == 0
+
+    graph = _graph(sd)
+    assert_no_dangling_refs(graph)
+    blocked = _by_prefix(graph, "#blocked/")
+    assert len(blocked) >= 2, f"expected #blocked for permission-denied + tool-failed, got {len(blocked)}"
+    for b in blocked:
+        assert "Failed" in _status_id(b), f"#blocked not FailedActionStatus: {_status_id(b)}"
+        assert b.get("error"), f"#blocked missing error: {b}"
+    errors = " ".join(str(b.get("error", "")) for b in blocked)
+    assert "user denied the write" in errors and "could not apply edit" in errors, errors
+
+
+def test_agent_file_deletion_materializes_delete_action(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # An agent/external file.deleted event -> DeleteAction (distinct from the rm-command path
+    # exercised by proc-delete); the deleted file is the action's object.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gone.txt").write_text("bye\n")
+    sd = _start(tmp_path)
+    _append(sd, "file.created", {"path": str(tmp_path / "gone.txt"), "tool_name": "Write"})
+    (tmp_path / "gone.txt").unlink()
+    _append(sd, "file.deleted", {"path": str(tmp_path / "gone.txt"), "tool_name": "Bash"})
+    assert main(["checkpoint"]) == 0
+
+    graph = _graph(sd)
+    assert_no_dangling_refs(graph)
+    deletes = [e for e in _by_prefix(graph, "#file-action/") if "DeleteAction" in _types(e)]
+    assert deletes, "file.deleted not materialized as a DeleteAction"
+    assert any(d.get("object") for d in deletes), "DeleteAction missing object (the deleted file)"

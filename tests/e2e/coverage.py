@@ -53,6 +53,7 @@ _FEATURES = [f"feature:{f}" for f in (
     "enforced-block-raw-bash", "enforced-block-output-write",
     "enforced-block-destroy", "enforced-block-exfil", "stop-hook-block",
     "agent-file-edits", "auto-start", "raw-bash-action", "subagent-action",
+    "tool-use-action", "housekeeping-action", "agent-file-update",
 )]
 
 REQUIRED_TAGS = frozenset(

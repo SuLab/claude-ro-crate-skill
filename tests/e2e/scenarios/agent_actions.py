@@ -80,6 +80,19 @@ def _check_assess(graph: list, result) -> None:
     assert assess, "no AssessAction entity in graph"
 
 
+def _check_surfaces(graph: list, result) -> None:
+    # Read/Glob (non-Bash tools) -> #tool-use Action; the automatic tool batches ->
+    # #housekeeping Action; editing an EXISTING file -> UpdateAction (the modify path).
+    tu = _by_prefix(graph, "#tool-use/")
+    assert tu, "no #tool-use/* Action — non-Bash tool activity (Read/Glob) not captured"
+    assert all("Action" in _types(e) for e in tu), f"#tool-use not Actions: {[_types(e) for e in tu]}"
+    hk = _by_prefix(graph, "#housekeeping/")
+    assert hk, "no #housekeeping/* Action — tool.batch.completed not captured"
+    fa = _by_prefix(graph, "#file-action/")
+    assert any("UpdateAction" in _types(e) for e in fa), \
+        f"no UpdateAction from the Edit of an existing file; types={[_types(e) for e in fa]}"
+
+
 SCENARIOS: list[ScenarioSpec] = [
     ScenarioSpec(
         name="agent-raw-bash",
@@ -156,6 +169,30 @@ SCENARIOS: list[ScenarioSpec] = [
                 "rcr checkpoint",
                 "rcr validate --json",
             ],
+        ),
+    ),
+    ScenarioSpec(
+        name="agent-surfaces",
+        area="natural",
+        seed_files=(
+            SeedFile("notes.txt", "read me\n"),
+            SeedFile("edit_me.txt", "the old value\n"),
+        ),
+        coverage_tags=frozenset({
+            "feature:tool-use-action", "feature:housekeeping-action",
+            "feature:agent-file-update",
+        }),
+        check=_check_surfaces,
+        prompt=(
+            "You are capturing provenance with the ro-crate-run skill. Steps, in order:\n"
+            "1. Run: rcr start \"Agent surfaces\" --mode advisory --profile auto\n"
+            "2. Use the Read tool to read notes.txt (do NOT use cat/Bash).\n"
+            "3. Use the Glob tool to list the *.txt files.\n"
+            "4. Use the Edit tool to change the word 'old' to 'new' in the EXISTING file "
+            "edit_me.txt (an in-place modification — use Edit, not Write).\n"
+            "5. Run: rcr checkpoint\n"
+            "6. Run: rcr validate --json\n"
+            "Using the Read/Glob/Edit tools directly is the point of this task."
         ),
     ),
     ScenarioSpec(
