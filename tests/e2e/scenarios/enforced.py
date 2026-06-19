@@ -30,12 +30,25 @@ def _check_blocked(needle: str):  # type: ignore[no-untyped-def]
 
 
 def _check_stop_blocked(graph: list, result) -> None:
-    # The Stop hook blocks on an open step in enforced mode (exit 2 + stderr reason).
+    # The enforced Stop hook blocks on an open step by returning exit 2 + a stderr reason
+    # (it does not write a dedicated journal event). Claude then RETRIES the stop, so each
+    # block produces another `session.stop.requested` event — multiple of them is reliable
+    # journal evidence the hook blocked repeatedly. The stderr reason is not always surfaced
+    # in headless claude's transcript, and the agent may exit 0 (gave up) rather than time
+    # out, so the transcript-marker / exit-124 signals alone are flaky; the journal is
+    # authoritative.
+    stop_requests = sum(
+        1 for e in _journal(result) if e.get("event_type") == "session.stop.requested"
+    )
     transcript = result.transcript.lower()
     markers = ("not ready to stop", "open step", "open phase", "repair provenance")
-    assert any(m in transcript for m in markers) or result.claude_exit == 124, (
+    assert (
+        stop_requests >= 2
+        or any(m in transcript for m in markers)
+        or result.claude_exit == 124
+    ), (
         "no evidence the Stop hook blocked on the open step "
-        f"(exit={result.claude_exit})\n{result.transcript[-1500:]}"
+        f"(exit={result.claude_exit}, stop_requests={stop_requests})\n{result.transcript[-1500:]}"
     )
 
 

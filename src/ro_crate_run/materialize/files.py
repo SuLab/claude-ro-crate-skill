@@ -69,13 +69,39 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
     max_bytes = fp.max_file_size_mb * 1024 * 1024
     plans: dict[str, FilePlan] = {}
 
-    def _is_protected(file_id: str) -> bool:
-        # A user-declared input/output (explicit `rcr input/output`, with its --description /
-        # --existence / --role flags) must not be clobbered by an inferred command-output or
-        # file-action plan for the same path. The later, generic plan would lose the user's
-        # flags. Keep the explicit declaration.
-        existing = plans.get(file_id)
-        return existing is not None and existing.user_declared
+    def _merge(new: FilePlan) -> FilePlan:
+        """Combine a freshly-considered plan with any prior plan for the same file_id.
+
+        A path can be considered more than once (e.g. declared via `rcr output` AND produced
+        as a command output). User-declared metadata (description/existence/role from an
+        explicit `rcr input/output`) takes precedence over inferred "Command output"
+        metadata, regardless of order — that is the completeness fix. But copy/included are
+        UNIONED so a genuinely-produced output's content is still captured even when the user
+        declared it by-reference (the default), and a sensitive plan stays sensitive (never
+        captured). Without the union a declared+produced output silently loses its bytes,
+        which would, e.g., defeat the public-export secret-scan gate.
+        """
+        old = plans.get(new.file_id)
+        if old is None:
+            return new
+        if old.user_declared and not new.user_declared:
+            user, other = old, new
+        elif new.user_declared and not old.user_declared:
+            user, other = new, old
+        else:
+            user, other = new, old
+        sensitive = old.sensitive or new.sensitive
+        return FilePlan(
+            file_id=new.file_id,
+            abs_path=new.abs_path or old.abs_path,
+            declared={**other.declared, **user.declared},
+            copy=(old.copy or new.copy) and not sensitive,
+            included=old.included or new.included,
+            reason=new.reason if new.copy else old.reason,
+            sensitive=sensitive,
+            role=user.role or other.role,
+            user_declared=old.user_declared or new.user_declared,
+        )
 
     def consider(
         path_str: str, role: str, copy_policy: Optional[str], declared: dict[str, Any],
@@ -87,30 +113,23 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
         resolved = _safe_resolve(raw, project_dir)
         if resolved is None:
             file_id = raw.as_uri() if raw.is_absolute() else str(raw)
-            if _is_protected(file_id):
-                return
-            plans.setdefault(
-                file_id,
-                FilePlan(
-                    file_id=file_id,
-                    abs_path=raw,
-                    declared=declared,
-                    copy=False,
-                    included=False,
-                    reason="outside-project-root",
-                    role=role,
-                    user_declared=user_declared,
-                ),
-            )
+            plans[file_id] = _merge(FilePlan(
+                file_id=file_id,
+                abs_path=raw,
+                declared=declared,
+                copy=False,
+                included=False,
+                reason="outside-project-root",
+                role=role,
+                user_declared=user_declared,
+            ))
             return
         file_id = str(resolved.relative_to(project_dir.resolve()))
         if _is_ignored(file_id, cfg.ignore_patterns):
             return
-        if _is_protected(file_id):
-            return
         if _is_sensitive(file_id):
             # Never read, hash, or copy — only a content-free reference is recorded.
-            plans[file_id] = FilePlan(
+            plans[file_id] = _merge(FilePlan(
                 file_id=file_id,
                 abs_path=resolved,
                 declared=declared,
@@ -120,7 +139,7 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
                 sensitive=True,
                 role=role,
                 user_declared=user_declared,
-            )
+            ))
             return
         included = _included_for_role(role, fp)
         is_file = resolved.exists() and resolved.is_file()
@@ -136,7 +155,7 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
         else:
             copy = included and cfg.copy_mode in {"copy", "mixed"}
             reason = "policy-copy" if copy else "referenced"
-        plans[file_id] = FilePlan(
+        plans[file_id] = _merge(FilePlan(
             file_id=file_id,
             abs_path=resolved,
             declared=declared,
@@ -145,7 +164,7 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
             reason=reason,
             role=role,
             user_declared=user_declared,
-        )
+        ))
 
     for item in model.inputs:
         consider(str(item.get("path", "")), "input", item.get("copy_policy"), dict(item),

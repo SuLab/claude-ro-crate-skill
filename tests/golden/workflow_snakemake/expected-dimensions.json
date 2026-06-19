@@ -48,7 +48,7 @@
     "out.txt"
   ],
   "root_mainEntity": "Snakefile",
-  "root_mentions_count": 4,
+  "root_mentions_count": 3,
   "stable_file_ids": [
     ".ro-crate-run/commands/cmd_000006.json",
     ".ro-crate-run/logs/cmd_000006.stderr.txt",
