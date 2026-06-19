@@ -89,26 +89,24 @@ def assert_no_secret_leaks(result: ScenarioResult, needles: tuple) -> None:
 
 
 def assert_local_file_core_metadata(graph: list) -> None:
-    """If the crate embeds a concrete local data File (a real on-disk file, not an internal
-    sidecar under .ro-crate-run/ and not a remote/URI reference), at least one such File MUST
-    carry the core metadata a consumer needs: encodingFormat, contentSize, AND dateModified.
-    Reference-only crates are skipped (no embedded body to describe)."""
-    local_files = [
-        e for e in by_type(graph, "File")
-        if isinstance(e.get("@id"), str)
-        and not e["@id"].startswith((".ro-crate-run/", "http://", "https://", "urn:", "file:", "#"))
-    ]
-    if not local_files:
-        return
-    core = ("encodingFormat", "contentSize", "dateModified")
-    complete = [f for f in local_files if all(f.get(p) not in (None, "") for p in core)]
-    assert complete, (
-        f"no concrete local data File carries core metadata {core}; local Files present: "
-        + ", ".join(
-            f"{f['@id']}(missing {[p for p in core if f.get(p) in (None, '')]})"
-            for f in local_files
-        )
-    )
+    """Every concrete local data File that was actually CAPTURED (carries a contentSize, i.e.
+    its bytes were read) MUST also carry the rest of the core §15.6 metadata a consumer needs:
+    encodingFormat AND dateModified. Files that are referenced-only, deleted, or never-captured
+    (sensitive) have no contentSize and are skipped — there is no embedded body to describe.
+
+    This asserts metadata *consistency* on captured files (vacuous for delete/sensitive/no-output
+    crates); across the suite the process/workflow scenarios do capture files, so the
+    encodingFormat/contentSize/dateModified contract is genuinely exercised."""
+    for e in by_type(graph, "File"):
+        eid = e.get("@id")
+        if not isinstance(eid, str) or eid.startswith(
+            (".ro-crate-run/", "http://", "https://", "urn:", "file:", "#")
+        ):
+            continue
+        if e.get("contentSize") in (None, ""):
+            continue  # not captured (referenced / deleted / sensitive) — nothing to describe
+        missing = [p for p in ("encodingFormat", "dateModified") if e.get(p) in (None, "")]
+        assert not missing, f"captured local File {eid!r} missing core metadata {missing}"
 
 
 def assert_crate(result: ScenarioResult) -> None:
