@@ -18,9 +18,41 @@ def _has_prop_value(graph: list, name: str) -> bool:
     return False
 
 
+def _types(entity: dict) -> list:
+    t = entity.get("@type")
+    return t if isinstance(t, list) else [t]
+
+
+def _existence_values(graph: list) -> set:
+    vals: set = set()
+    for e in graph:
+        if not ({"File", "Dataset"} & set(_types(e))):
+            continue
+        ap = e.get("additionalProperty")
+        ap = ap if isinstance(ap, list) else ([ap] if ap else [])
+        for p in ap:
+            if isinstance(p, dict) and p.get("propertyID") == "existence":
+                vals.add(p.get("value"))
+    return vals
+
+
 def _check_io_flags(graph: list, result) -> None:
-    # All declared files become File entities; copied ones land in hasPart.
     assert len(by_type(graph, "File")) >= 4, "expected several File entities"
+    # Every declared existence class must be MATERIALIZED into the crate (not just stored
+    # in state.json), so a consumer can distinguish an observed input from an
+    # expected-but-absent output.
+    present = _existence_values(graph)
+    expected = {"observed local", "observed remote", "generated",
+                "expected", "missing", "declared-only"}
+    assert expected <= present, f"existence values not materialized: {expected - present}"
+    ids = entities_by_id(graph)
+    haspart = {r.get("@id") for r in (ids.get("./", {}).get("hasPart") or [])}
+    # policy:copy — the --copy output is a navigable data part.
+    assert "out.txt" in haspart, f"copied output out.txt not in root hasPart: {sorted(haspart)}"
+    # policy:out-of-root-reference — an out-of-root input is a file: reference, never a part.
+    host = [e["@id"] for e in graph if str(e.get("@id", "")).startswith("file:")]
+    assert host, "no out-of-root file: reference entity"
+    assert not (set(host) & haspart), "out-of-root reference was copied into hasPart"
 
 
 def _check_notes_decisions(graph: list, result) -> None:
@@ -39,8 +71,16 @@ def _check_phase_open_warning(graph: list, result) -> None:
 def _check_git(graph: list, result) -> None:
     git = entities_by_id(graph).get("#git/state")
     assert git is not None, "no #git/state entity"
+    assert "Thing" in _types(git), f"#git/state is not a Thing: {_types(git)}"  # entity:Thing
     assert _has_prop_value(graph, "branch"), "no git branch PropertyValue"
     assert _has_prop_value(graph, "dirty"), "no git dirty PropertyValue"
+    # The e2e harness seeds an `origin` remote, so the remote PropertyValue must appear.
+    assert _has_prop_value(graph, "remote"), "no git remote PropertyValue"
+    # The scanned dependency manifest is materialized with a verifiable sha256 digest.
+    req = entities_by_id(graph).get("requirements.txt")
+    assert req is not None, "requirements.txt dependency manifest not materialized"
+    digest = (req.get("identifier") or {}).get("value", "")
+    assert len(str(digest)) == 64, f"dependency manifest missing sha256: {req}"
 
 
 def _check_journal_embedded(graph: list, result) -> None:
@@ -165,7 +205,8 @@ SCENARIOS: list[ScenarioSpec] = [
                 'rcr start "Git and deps" --mode advisory --profile process',
                 "rcr config file_policy.include_git_diff always",
                 'rcr software python3 --version "3.12.3"',
-                "rcr run -- python3 -c \"open('README.md','a').write('dirty change\\n')\"",
+                "rcr run --outputs README.md -- python3 -c "
+                "\"open('README.md','a').write('dirty change\\n')\"",
                 "rcr output README.md --role doc",
                 "rcr checkpoint",
                 "rcr validate --json",

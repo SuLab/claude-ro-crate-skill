@@ -10,7 +10,10 @@ if str(_REPO) not in sys.path:
 
 from tests.e2e.spec import ScenarioResult  # noqa: E402
 from tests.golden._compare import find_secret_leaks  # noqa: E402
-from tests.graph_helpers import assert_no_dangling_refs  # noqa: E402
+from tests.graph_helpers import (  # noqa: E402
+    assert_declared_io_reachable,
+    assert_no_dangling_refs,
+)
 
 RO_CRATE_DESCRIPTOR_CONFORMS = "https://w3id.org/ro/crate/1.2"
 
@@ -99,6 +102,7 @@ def assert_crate(result: ScenarioResult) -> None:
     assert result.graph is not None, \
         f"no crate emitted (claude_exit={result.claude_exit})\n{result.transcript[-2000:]}"
     assert_no_dangling_refs(result.graph)
+    assert_declared_io_reachable(result.graph)
     assert_descriptor(result.graph)
     assert_valid(result, statuses=spec.expect_validation_status)
     if spec.expected_profile_uri:

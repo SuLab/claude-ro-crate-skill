@@ -10,6 +10,23 @@ from tests.e2e.scenarios._common import (
 )
 from tests.e2e.spec import ScenarioSpec, SeedFile
 
+
+def _types(entity: dict) -> list:
+    t = entity.get("@type")
+    return t if isinstance(t, list) else [t]
+
+
+def _file_sha256(entity: dict) -> str | None:
+    # rcr records the digest as a nested identifier PropertyValue (propertyID 'sha256');
+    # there is no top-level 'sha256' key.
+    ident = entity.get("identifier")
+    for cand in (ident if isinstance(ident, list) else [ident]):
+        if isinstance(cand, dict) and cand.get("propertyID") == "sha256":
+            v = str(cand.get("value", ""))
+            if len(v) == 64:
+                return v
+    return None
+
 CWL = """cwlVersion: v1.2
 class: Workflow
 inputs:
@@ -60,20 +77,45 @@ def _has_status(action: dict, needle: str) -> bool:
 
 
 def _check_proc_minimal(graph: list, result) -> None:
+    ids = entities_by_id(graph)
+    assert "./" in ids, "missing root data entity"
+    assert "Dataset" in _types(ids["./"]), f"root is not a Dataset: {_types(ids['./'])}"
+
+    # A CreateAction whose result/instrument/agent all resolve, with a terminal status.
     assert_entity_type(graph, "CreateAction", min_count=1)
     actions = by_type(graph, "CreateAction")
     assert any(a.get("result") for a in actions), "no CreateAction has a result file"
-    assert any(a.get("instrument") for a in actions), "no CreateAction has an instrument"
-    assert any(e.get("@id", "").startswith("#software/") for e in graph), \
-        "no #software/* SoftwareApplication entity"
-    assert "./" in entities_by_id(graph)
+    instruments = [a.get("instrument") for a in actions if a.get("instrument")]
+    assert instruments, "no CreateAction has an instrument"
+    assert all(i.get("@id") in ids and "SoftwareApplication" in _types(ids[i["@id"]])
+               for i in instruments), "instrument does not resolve to a SoftwareApplication"
+    person_ids = {e["@id"] for e in by_type(graph, "Person")}
+    assert person_ids, "no Person actor entity (human provenance missing)"
+    agents = [a.get("agent") for a in actions if a.get("agent")]
+    assert agents and any(a.get("@id") in person_ids for a in agents), \
+        "no CreateAction is agented to a Person"
+    assert any(_has_status(a, "Completed") for a in actions), \
+        "no CreateAction reports CompletedActionStatus"
+
+    # SoftwareApplication with a recorded version.
+    sw = [e for e in graph if str(e.get("@id", "")).startswith("#software/")]
+    assert sw and any(e.get("softwareVersion") or e.get("version") for e in sw), \
+        "no #software/* SoftwareApplication with a version"
+
+    # Output File carries a sha256 digest; a Profile entity backs the root conformsTo.
+    assert any(_file_sha256(f) for f in by_type(graph, "File")), "no File carries a sha256"
+    assert by_type(graph, "Profile"), "no Profile entity backing root conformsTo"
 
 
 def _check_proc_multi(graph: list, result) -> None:
+    ids = entities_by_id(graph)
     assert_entity_type(graph, "CreateAction", min_count=1)
     assert_entity_type(graph, "UpdateAction", min_count=1)
     creates = by_type(graph, "CreateAction")
-    assert any(a.get("object") for a in creates), "no CreateAction with an object (input)"
+    # prop:action:object — a command's --inputs becomes the action's object, and it resolves.
+    objects = [o for a in creates for o in (a.get("object") or [])]
+    assert objects, "no CreateAction with an object (input)"
+    assert all(o.get("@id") in ids for o in objects), "action object ref does not resolve"
 
 
 def _check_proc_failed(graph: list, result) -> None:
@@ -122,6 +164,9 @@ SCENARIOS: list[ScenarioSpec] = [
         expected_profile_uri=PROCESS_URI,
         seed_files=(SeedFile("data.csv", "a,b\n1,2\n3,4\n"),),
         append_system_prompt=STRICT_PREAMBLE,
+        # A fully-specified process crate (software + hashed I/O + producing action) must
+        # validate with NO warnings, not merely no errors.
+        expect_validation_status=("passed",),
         coverage_tags=frozenset({
             "cmd:start", "cmd:software", "cmd:input", "cmd:run", "cmd:output",
             "cmd:checkpoint", "cmd:validate",
@@ -131,7 +176,7 @@ SCENARIOS: list[ScenarioSpec] = [
             "flag:validate:--json",
             "entity:CreateAction", "entity:File", "entity:SoftwareApplication",
             "entity:Person", "entity:Dataset", "entity:Profile",
-            "prop:action:object", "prop:action:result", "prop:action:instrument",
+            "prop:action:result", "prop:action:instrument",
             "prop:action:agent", "prop:action:actionStatus", "prop:file:sha256",
             "profile:process", "mode:advisory",
         }),
@@ -157,6 +202,7 @@ SCENARIOS: list[ScenarioSpec] = [
         append_system_prompt=STRICT_PREAMBLE,
         coverage_tags=frozenset({
             "entity:UpdateAction", "flag:run:--inputs", "mode:monitored",
+            "prop:action:object",
         }),
         check=_check_proc_multi,
         prompt=prescriptive_prompt(
