@@ -63,3 +63,33 @@ def test_accept_reject_and_phases_materialize(tmp_path: Path, monkeypatch) -> No
     assert_no_dangling_refs(graph)
     assert any("AssessAction" in _types(e) for e in graph), "accept/reject not materialized"
     assert any(str(e.get("@id", "")).startswith("#phase/") for e in graph), "phase not materialized"
+
+
+def test_synthesized_workflow_weaves_agent_actions_as_steps(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # An edit-only session (no rcr run): the synthesized workflow's steps ARE the agent's
+    # file edits, in order, each linked via a ControlAction; a workflow-level action uses
+    # the workflow as instrument (L3) and is agented to the AI.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.py").write_text("v1\n")
+    assert main(["start", "Weave", "--mode", "advisory", "--profile", "auto", "--no-checkpoint"]) == 0
+    sd = tmp_path / ".ro-crate-run"
+    _append(sd, "file.created", {"path": str(tmp_path / "a.py"), "tool_name": "Write"})
+    (tmp_path / "a.py").write_text("v2\n")
+    _append(sd, "file.modified", {"path": str(tmp_path / "a.py"), "tool_name": "Edit"})
+    assert main(["checkpoint"]) == 0
+
+    graph = json.loads((sd / "ro-crate" / "ro-crate-metadata.json").read_text())["@graph"]
+    assert_no_dangling_refs(graph)
+    wf = next(e for e in graph if e.get("@id") == "#workflow/agent-actions")
+    steps = wf.get("step") or []
+    assert len(steps) == 2, f"workflow should have 2 woven steps, got {steps}"
+    howto_ids = {e["@id"] for e in graph if "HowToStep" in _types(e)}
+    assert all(s["@id"] in howto_ids for s in steps), "workflow step refs must resolve to HowToSteps"
+    controls = [e for e in graph if "ControlAction" in _types(e)]
+    assert len(controls) >= 2
+    assert all(
+        str((c.get("object") or {}).get("@id", "")).startswith("#file-action/") for c in controls
+    ), "each ControlAction should control a file-action"
+    wf_actions = [e for e in graph if (e.get("instrument") or {}).get("@id") == "#workflow/agent-actions"]
+    assert wf_actions, "no action uses the workflow as instrument (L3)"
+    assert wf_actions[0]["agent"]["@id"] == "#actor/claude-code"

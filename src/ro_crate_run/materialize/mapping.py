@@ -648,8 +648,15 @@ def build_workflow_action(
     wf_id: str,
     project_dir: os.PathLike[str] | str,
 ) -> list[dict[str, Any]]:
-    """Return a top-level workflow-run CreateAction for workflow/provenance profiles."""
-    if not model.workflow or not model.commands:
+    """Return a top-level workflow-run action for workflow/provenance profiles.
+
+    Fires whenever there is execution-shaped work — `rcr run` commands OR the agent's
+    own file edits / raw commands — so an edit-only session (no `rcr run`) still has an
+    action that uses the workflow as `instrument` (required by L3 workflow).
+    """
+    if not model.workflow:
+        return []
+    if not (model.commands or model.file_actions or model.raw_commands):
         return []
     proj = Path(project_dir)
     workflow_status = (
@@ -670,6 +677,22 @@ def build_workflow_action(
                 return {"@id": p.as_uri()}
         return {"@id": str(p)}
 
+    if model.commands:
+        start_time = model.commands[0].started_at
+        end_time = model.commands[-1].ended_at or model.commands[-1].started_at
+        # `rcr run` work is recorded by the rcr materializer.
+        agent_id = "#actor/rcr"
+    else:
+        # Edit-only session: the Claude agent performed the work directly.
+        stamps = [
+            str(item.get("timestamp", ""))
+            for item in (*model.file_actions, *model.raw_commands)
+            if item.get("timestamp")
+        ]
+        start_time = min(stamps) if stamps else model.created_at
+        end_time = max(stamps) if stamps else model.updated_at
+        agent_id = "#actor/claude-code"
+
     wf_path = str(model.workflow.get("path", ""))
     return [
         {
@@ -677,10 +700,10 @@ def build_workflow_action(
             "@type": "CreateAction",
             "name": f"Execute workflow for {model.title}",
             "description": "Workflow-level execution action.",
-            "startTime": model.commands[0].started_at,
-            "endTime": model.commands[-1].ended_at or model.commands[-1].started_at,
+            "startTime": start_time,
+            "endTime": end_time,
             "actionStatus": {"@id": workflow_status},
-            "agent": {"@id": "#actor/rcr"},
+            "agent": {"@id": agent_id},
             "instrument": {"@id": wf_id},
             "object": [
                 _ref(str(item["path"]))
@@ -695,6 +718,36 @@ def build_workflow_action(
 # ---------------------------------------------------------------------------
 # Steps (C11)
 # ---------------------------------------------------------------------------
+
+
+def build_workflow_timeline(
+    ordered_actions: list[tuple[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """For a synthesized agent workflow with no explicit rcr steps, turn the agent's
+    ordered action sequence INTO the workflow's steps: one HowToStep per action (with a
+    1..N position) plus a ControlAction (instrument=HowToStep, object=the action). Returns
+    (step+control entities, step refs for the workflow's `step` array). Callers pass only
+    actions already emitted in the graph, so refs never dangle.
+    """
+    entities: list[dict[str, Any]] = []
+    step_refs: list[dict[str, str]] = []
+    for position, (action_id, name) in enumerate(ordered_actions, start=1):
+        step_id = f"#wfstep/{position}"
+        entities.append({
+            "@id": step_id,
+            "@type": "HowToStep",
+            "name": name,
+            "position": position,
+        })
+        entities.append({
+            "@id": f"#wfcontrol/{position}",
+            "@type": "ControlAction",
+            "name": f"Step {position}",
+            "instrument": {"@id": step_id},
+            "object": {"@id": action_id},
+        })
+        step_refs.append({"@id": step_id})
+    return entities, step_refs
 
 
 def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:

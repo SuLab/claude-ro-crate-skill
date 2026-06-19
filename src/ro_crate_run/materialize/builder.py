@@ -297,6 +297,24 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         if not any(str(t) in {"SoftwareApplication", "File", "Dataset"} for t in types):
             root["mentions"].append({"@id": e["@id"]})
 
+    # --- Weave the agent's actions INTO the synthesized workflow as ordered steps ---
+    # When the workflow is synthesized (no external definition file) and the agent did not
+    # declare explicit rcr steps, the workflow's steps ARE the agent's execution-shaped
+    # actions (commands + file edits + raw commands + subagent dispatches) in time order.
+    if workflow_entities and model.workflow and model.workflow.get("synthetic") and not model.steps:
+        command_action_ids = {c.action_id for c in model.commands}
+        timeline = [
+            e for e in graph
+            if e.get("@id") in command_action_ids
+            or str(e.get("@id", "")).startswith(("#file-action/", "#raw-command/", "#subagent/"))
+        ]
+        timeline.sort(key=lambda e: (str(e.get("startTime", "")), str(e.get("@id", ""))))
+        ordered = [(str(e["@id"]), str(e.get("name", "step"))) for e in timeline]
+        step_entities, step_refs = mapping.build_workflow_timeline(ordered)
+        if step_refs:
+            graph.extend(step_entities)
+            workflow_entities[0]["step"] = step_refs
+
     # --- Notes, decisions, parameter connections ---
     note_decision = mapping.build_notes_decisions(model)
     graph.extend(note_decision)
