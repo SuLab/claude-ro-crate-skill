@@ -502,6 +502,7 @@ def build_file_entity(
         "contentSize": str(rec["content_size"]) if rec.get("content_size") is not None else None,
         "dateModified": rec.get("date_modified"),
     }
+    add_props: list[dict[str, Any]] = []
     if rec.get("sha256"):
         entity["identifier"] = {
             "@type": "PropertyValue",
@@ -509,12 +510,25 @@ def build_file_entity(
             "value": str(rec["sha256"]).replace("sha256:", ""),
         }
     elif rec.get("hash_status") == "skipped":
-        entity["additionalProperty"] = {
+        add_props.append({
             "@type": "PropertyValue",
             "propertyID": "hash-status",
             "value": "not-hashed",
             "description": str(rec.get("hash_skip_reason", "skipped")),
-        }
+        })
+    # Materialize the declared existence classification (observed-local/remote, generated,
+    # expected, missing, declared-only) so a crate consumer can tell an observed input from
+    # an expected-but-absent output — otherwise this lives only in state.json (SPEC §11).
+    existence = declared.get("existence")
+    if existence:
+        add_props.append({
+            "@type": "PropertyValue",
+            "propertyID": "existence",
+            "value": str(existence),
+        })
+    if add_props:
+        # Single dict when one (keeps the established hash-status shape), list when several.
+        entity["additionalProperty"] = add_props[0] if len(add_props) == 1 else add_props
     if formal_parameter_id:
         entity["exampleOfWork"] = {"@id": formal_parameter_id}
     return {k: v for k, v in entity.items() if v is not None}
@@ -859,16 +873,30 @@ def build_containers(model: RunModel) -> list[dict[str, Any]]:
 
 
 def build_dependencies(model: RunModel) -> list[dict[str, Any]]:
-    """Emit a File entity per observed dependency lockfile."""
-    return [
-        {
+    """Emit a File entity per observed dependency lockfile / manifest.
+
+    Carries the recorded sha256 so the manifest is verifiable (the digest is captured at
+    scan time but was previously dropped), and gives it a sensible description.
+    """
+    entities: list[dict[str, Any]] = []
+    for dep in model.dependencies:
+        name = os.path.basename(str(dep["path"]))
+        kind = str(dep.get("kind", "lockfile")) or "lockfile"
+        entity: dict[str, Any] = {
             "@id": str(dep["path"]),
             "@type": "File",
-            "name": os.path.basename(str(dep["path"])),
-            "description": f"{dep.get('kind', 'dependency')} lockfile",
+            "name": name,
+            "description": f"Dependency manifest ({kind})",
         }
-        for dep in model.dependencies
-    ]
+        digest = str(dep.get("file_record", "")).replace("sha256:", "")
+        if digest:
+            entity["identifier"] = {
+                "@type": "PropertyValue",
+                "propertyID": "sha256",
+                "value": digest,
+            }
+        entities.append(entity)
+    return entities
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@
     "HowToStep": 2,
     "Person": 1,
     "Profile": 1,
-    "PropertyValue": 2,
+    "PropertyValue": 3,
     "SoftwareApplication": 7,
     "SoftwareSourceCode": 1
   },
@@ -48,7 +48,7 @@
     "out.txt"
   ],
   "root_mainEntity": "Snakefile",
-  "root_mentions_count": 2,
+  "root_mentions_count": 4,
   "stable_file_ids": [
     ".ro-crate-run/commands/cmd_000006.json",
     ".ro-crate-run/logs/cmd_000006.stderr.txt",

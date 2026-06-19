@@ -17,6 +17,8 @@ class FilePlan:
     included: bool = False
     reason: str = ""
     sensitive: bool = False
+    role: str = ""               # consider() role: input | output | source
+    user_declared: bool = False  # True iff from an explicit `rcr input/output` (not inferred)
 
 
 # Files that must NEVER be captured (read, hashed, or copied) regardless of config
@@ -67,13 +69,26 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
     max_bytes = fp.max_file_size_mb * 1024 * 1024
     plans: dict[str, FilePlan] = {}
 
-    def consider(path_str: str, role: str, copy_policy: Optional[str], declared: dict[str, Any]) -> None:
+    def _is_protected(file_id: str) -> bool:
+        # A user-declared input/output (explicit `rcr input/output`, with its --description /
+        # --existence / --role flags) must not be clobbered by an inferred command-output or
+        # file-action plan for the same path. The later, generic plan would lose the user's
+        # flags. Keep the explicit declaration.
+        existing = plans.get(file_id)
+        return existing is not None and existing.user_declared
+
+    def consider(
+        path_str: str, role: str, copy_policy: Optional[str], declared: dict[str, Any],
+        *, user_declared: bool = False,
+    ) -> None:
         if not path_str:
             return
         raw = Path(path_str)
         resolved = _safe_resolve(raw, project_dir)
         if resolved is None:
             file_id = raw.as_uri() if raw.is_absolute() else str(raw)
+            if _is_protected(file_id):
+                return
             plans.setdefault(
                 file_id,
                 FilePlan(
@@ -83,11 +98,15 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
                     copy=False,
                     included=False,
                     reason="outside-project-root",
+                    role=role,
+                    user_declared=user_declared,
                 ),
             )
             return
         file_id = str(resolved.relative_to(project_dir.resolve()))
         if _is_ignored(file_id, cfg.ignore_patterns):
+            return
+        if _is_protected(file_id):
             return
         if _is_sensitive(file_id):
             # Never read, hash, or copy — only a content-free reference is recorded.
@@ -99,6 +118,8 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
                 included=False,
                 reason="sensitive-never-captured",
                 sensitive=True,
+                role=role,
+                user_declared=user_declared,
             )
             return
         included = _included_for_role(role, fp)
@@ -122,12 +143,16 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
             copy=copy,
             included=included,
             reason=reason,
+            role=role,
+            user_declared=user_declared,
         )
 
     for item in model.inputs:
-        consider(str(item.get("path", "")), "input", item.get("copy_policy"), dict(item))
+        consider(str(item.get("path", "")), "input", item.get("copy_policy"), dict(item),
+                 user_declared=True)
     for item in model.outputs:
-        consider(str(item.get("path", "")), "output", item.get("copy_policy"), dict(item))
+        consider(str(item.get("path", "")), "output", item.get("copy_policy"), dict(item),
+                 user_declared=True)
     for command in model.commands:
         for out in command.outputs:
             consider(out, "output", None, {"path": out, "description": "Command output"})

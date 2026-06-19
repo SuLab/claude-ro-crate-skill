@@ -174,7 +174,12 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     graph.extend(mapping.build_git(model))
     graph.extend(mapping.build_environment(model))
     graph.extend(mapping.build_containers(model))
-    graph.extend(mapping.build_dependencies(model))
+    dependency_entities = mapping.build_dependencies(model)
+    graph.extend(dependency_entities)
+    # Reference dependency manifests from the root so they are discoverable (expected
+    # provenance information); without this the lockfile File entity is an orphan.
+    for dep_entity in dependency_entities:
+        root["mentions"].append({"@id": dep_entity["@id"]})
 
     # --- Parameters ---
     param_entities = mapping.build_parameters(model)
@@ -196,6 +201,13 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         file_ids.add(plan.file_id)
         if plan.included:
             root["hasPart"].append({"@id": plan.file_id})
+        elif getattr(plan, "role", "") == "input":
+            # A declared input that policy does NOT copy into the crate (e.g. an external /
+            # by-reference dataset) must still be reachable from the root — otherwise the
+            # user's explicitly-declared input is an orphan, silently absent from the crate's
+            # navigable structure. Reference it via `mentions` (it is described, not a copied
+            # data part).
+            root["mentions"].append({"@id": plan.file_id})
         if plan.copy:
             _copy_into_crate(plan.abs_path, crate_dir / plan.file_id)
 

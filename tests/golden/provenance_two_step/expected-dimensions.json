@@ -75,7 +75,7 @@
     "HowToStep": 2,
     "Person": 1,
     "Profile": 1,
-    "PropertyValue": 3,
+    "PropertyValue": 4,
     "SoftwareApplication": 7,
     "SoftwareSourceCode": 1
   },
@@ -88,7 +88,7 @@
     "mid.txt"
   ],
   "root_mainEntity": "flow.cwl",
-  "root_mentions_count": 3,
+  "root_mentions_count": 5,
   "stable_file_ids": [
     ".ro-crate-run/commands/cmd_000007.json",
     ".ro-crate-run/commands/cmd_000011.json",

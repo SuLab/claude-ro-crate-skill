@@ -141,6 +141,7 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
                 {
                     "path": payload.get("path", ""),
                     "kind": payload.get("kind", ""),
+                    "file_record": payload.get("file_record", ""),
                 }
             )
         elif event.event_type == "run.aborted":
