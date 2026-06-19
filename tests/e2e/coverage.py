@@ -32,7 +32,7 @@ _ENTITIES = [f"entity:{t}" for t in (
     "Person", "SoftwareApplication", "Dataset", "File", "CreateAction", "UpdateAction",
     "DeleteAction", "Action", "ControlAction", "FormalParameter", "PropertyValue",
     "HowToStep", "ComputationalWorkflow", "ContainerImage", "CreativeWork",
-    "Profile", "ParameterConnection", "Thing",
+    "Profile", "ParameterConnection", "Thing", "OrganizeAction", "AssessAction",
 )]
 _PROPS = [f"prop:{p}" for p in (
     "action:object", "action:result", "action:instrument", "action:agent",
@@ -52,6 +52,7 @@ _FEATURES = [f"feature:{f}" for f in (
     "open-phase-warning", "env-allowlist", "custom-redaction", "never-capture",
     "enforced-block-raw-bash", "enforced-block-output-write",
     "enforced-block-destroy", "enforced-block-exfil", "stop-hook-block",
+    "agent-file-edits", "auto-start", "raw-bash-action", "subagent-action",
 )]
 
 REQUIRED_TAGS = frozenset(

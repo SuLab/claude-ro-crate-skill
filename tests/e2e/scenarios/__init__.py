@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.e2e.scenarios import (
     admin,
+    agent_actions,
     enforced,
     fields,
     natural,
@@ -34,6 +35,7 @@ ALL_SCENARIOS = (
     + recovery.SCENARIOS
     + privacy.SCENARIOS
     + natural.SCENARIOS
+    + agent_actions.SCENARIOS
 )
 
 
