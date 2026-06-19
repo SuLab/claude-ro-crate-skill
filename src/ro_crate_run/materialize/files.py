@@ -131,6 +131,13 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
     for command in model.commands:
         for out in command.outputs:
             consider(out, "output", None, {"path": out, "description": "Command output"})
+    for fa in model.file_actions:
+        fa_path = str(fa.get("path", ""))
+        if fa_path:
+            consider(
+                fa_path, "output", None,
+                {"path": fa_path, "description": f"File {fa.get('op', 'edited')} by the agent"},
+            )
     if model.workflow and model.workflow.get("path"):
         consider(str(model.workflow["path"]), "source", None, dict(model.workflow))
     return list(plans.values())

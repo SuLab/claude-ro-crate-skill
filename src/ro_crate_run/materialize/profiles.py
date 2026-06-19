@@ -26,6 +26,11 @@ def select_profile(run_model: RunModel, requested: str = "auto") -> ProfileSelec
         evidence.append({"kind": "phases", "count": len(run_model.phases)})
     if run_model.commands:
         evidence.append({"kind": "commands", "count": len(run_model.commands)})
+    agent_actions = (
+        len(run_model.file_actions) + len(run_model.raw_commands) + len(run_model.subagents)
+    )
+    if agent_actions:
+        evidence.append({"kind": "agent_actions", "count": agent_actions})
     if requested in {"process", "workflow", "provenance"}:
         return ProfileSelection(requested, PROFILE_URIS[requested], "high", evidence)
     # The actions taken by the Claude Code agent ARE the workflow (SPEC §16): promotion
@@ -37,7 +42,10 @@ def select_profile(run_model: RunModel, requested: str = "auto") -> ProfileSelec
     executed_steps = any(
         step.get("status") not in (None, "identified") for step in run_model.steps.values()
     ) or any(command.step_id for command in run_model.commands)
-    structured = bool(run_model.phases) or len(run_model.commands) > 1
+    # The agent's file edits and other actions count as structured work, so edit-driven
+    # sessions (even with zero rcr-run commands) are treated as a workflow.
+    total_actions = len(run_model.commands) + agent_actions
+    structured = bool(run_model.phases) or total_actions > 1 or bool(run_model.file_actions)
     if executed_steps:
         profile, confidence = "provenance", "high"
     elif run_model.workflow:

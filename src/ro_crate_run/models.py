@@ -270,6 +270,15 @@ class RunModel:
     containers: list[JsonDict] = field(default_factory=list)
     dependencies: list[JsonDict] = field(default_factory=list)
     actors: list[Actor] = field(default_factory=list)
+    # Agent-action families: the Claude Code agent's own actions are the workflow (SPEC §16).
+    # Each is projected from journal events the reducer previously dropped.
+    file_actions: list[JsonDict] = field(default_factory=list)      # file.created/modified/changed/deleted
+    raw_commands: list[JsonDict] = field(default_factory=list)      # substantive raw Bash (tool.completed)
+    subagents: list[JsonDict] = field(default_factory=list)         # agent.task.* / agent.subagent.*
+    blocked_actions: list[JsonDict] = field(default_factory=list)   # tool.blocked / permission.denied
+    prompts: list[JsonDict] = field(default_factory=list)           # human.prompt
+    tool_uses: list[JsonDict] = field(default_factory=list)         # other tool.completed (Read/Grep/MCP/...)
+    housekeeping: list[JsonDict] = field(default_factory=list)      # cwd.changed / worktree.* / compaction.*
 
 
 def dataclass_to_dict(value: Any) -> Any:

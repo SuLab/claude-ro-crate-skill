@@ -288,6 +288,15 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
             graph.append(mapping.build_file_entity(input_plan, max_hash_bytes))
             file_ids.add(input_id)
 
+    # --- Agent action families (SPEC §16: the Claude agent's actions ARE the workflow) ---
+    agent_action_entities = mapping.build_agent_actions(model, project_dir)
+    graph.extend(agent_action_entities)
+    for e in agent_action_entities:
+        types = e["@type"] if isinstance(e["@type"], list) else [e["@type"]]
+        # SoftwareApplication/File are referenced by the actions, not mentioned directly.
+        if not any(str(t) in {"SoftwareApplication", "File", "Dataset"} for t in types):
+            root["mentions"].append({"@id": e["@id"]})
+
     # --- Notes, decisions, parameter connections ---
     note_decision = mapping.build_notes_decisions(model)
     graph.extend(note_decision)

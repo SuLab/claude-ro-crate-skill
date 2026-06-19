@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from ro_crate_run.events import event_from_dict
 from ro_crate_run.models import CommandRecord, RunModel
@@ -53,9 +54,15 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
         elif event.event_type == "human.decision":
             model.decisions.append(payload | {"visibility": event.visibility})
         elif event.event_type == "workflow.phase.started":
-            model.phases[str(payload["name"])] = payload | {"status": "started"}
+            model.phases[str(payload["name"])] = payload | {
+                "status": "started", "timestamp": event.timestamp,
+            }
         elif event.event_type == "workflow.phase.completed":
-            model.phases.setdefault(str(payload["name"]), payload)["status"] = "completed"
+            entry = model.phases.setdefault(
+                str(payload["name"]), payload | {"timestamp": event.timestamp}
+            )
+            entry["status"] = "completed"
+            entry["end_timestamp"] = event.timestamp
         elif event.event_type == "workflow.step.started":
             step_id = str(payload["step_id"])
             model.steps[step_id] = payload | {"status": "started"}
@@ -139,13 +146,99 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
         elif event.event_type == "run.aborted":
             model.aborted = True
         elif event.event_type == "human.accepted_result":
-            model.results.append(payload | {"accepted": True})
+            model.results.append(payload | {"accepted": True, "timestamp": event.timestamp})
         elif event.event_type == "human.rejected_result":
-            model.results.append(payload | {"accepted": False})
+            model.results.append(payload | {"accepted": False, "timestamp": event.timestamp})
         elif event.event_type == "workflow.step.identified":
             step_id = str(payload.get("step_id", payload.get("name", "")))
             if step_id and step_id not in model.steps:
                 model.steps[step_id] = payload | {"status": "identified"}
+        elif event.event_type in {
+            "file.created", "file.modified", "file.changed", "file.deleted",
+        }:
+            # An agent file edit (Write/Edit/MultiEdit/NotebookEdit, or an external FileChanged).
+            model.file_actions.append({
+                "path": str(payload.get("path", "")),
+                "tool_name": str(payload.get("tool_name", "")),
+                "op": event.event_type.split(".", 1)[1],
+                "timestamp": event.timestamp,
+                "sequence": event.sequence,
+                "step_id": event.step_id,
+                "phase_id": event.phase_id,
+            })
+        elif event.event_type == "human.prompt":
+            model.prompts.append({
+                "prompt": str(payload.get("prompt", "")),
+                "prompt_hash": str(payload.get("prompt_hash", "")),
+                "timestamp": event.timestamp,
+                "sequence": event.sequence,
+            })
+        elif event.event_type == "tool.blocked":
+            model.blocked_actions.append({
+                "tool_name": str(payload.get("tool_name", "")),
+                "command": str(payload.get("command", "")),
+                "reason": str(payload.get("reason", "")),
+                "timestamp": event.timestamp,
+                "sequence": event.sequence,
+                "kind": "policy",
+            })
+        elif event.event_type == "permission.denied":
+            model.blocked_actions.append({
+                "tool_name": str(payload.get("tool_name", payload.get("tool", ""))),
+                "reason": str(payload.get("reason", payload.get("message", "permission denied"))),
+                "timestamp": event.timestamp,
+                "sequence": event.sequence,
+                "kind": "permission",
+            })
+        elif event.event_type in {
+            "agent.task.created", "agent.task.completed",
+            "agent.subagent.started", "agent.subagent.completed",
+        }:
+            model.subagents.append({
+                "event": event.event_type,
+                "description": str(
+                    payload.get("description")
+                    or payload.get("prompt")
+                    or payload.get("subagent_type")
+                    or ""
+                ),
+                "subagent_type": str(payload.get("subagent_type", "")),
+                "task_id": str(
+                    payload.get("task_id") or payload.get("id") or payload.get("agentId") or ""
+                ),
+                "timestamp": event.timestamp,
+                "sequence": event.sequence,
+            })
+        elif event.event_type == "tool.completed":
+            tool_name = str(payload.get("tool_name", ""))
+            command = _bash_command(payload)
+            if tool_name == "Bash" and command and not command.strip().startswith("rcr "):
+                # Substantive raw shell NOT wrapped in rcr run (rcr-wrapped commands are
+                # already captured as execution.command.* -> CommandRecord; skip them here).
+                model.raw_commands.append({
+                    "command": command,
+                    "timestamp": event.timestamp,
+                    "sequence": event.sequence,
+                    "step_id": event.step_id,
+                })
+            elif tool_name and tool_name != "Bash":
+                model.tool_uses.append({
+                    "tool_name": tool_name,
+                    "timestamp": event.timestamp,
+                    "sequence": event.sequence,
+                })
+        elif event.event_type in {
+            "environment.cwd.changed", "git.worktree.created", "git.worktree.removed",
+            "conversation.compaction.started", "conversation.compaction.completed",
+        }:
+            model.housekeeping.append({
+                "event": event.event_type,
+                "detail": str(
+                    payload.get("new_cwd") or payload.get("path") or payload.get("cwd") or ""
+                ),
+                "timestamp": event.timestamp,
+                "sequence": event.sequence,
+            })
     model.commands = list(commands_by_id.values())
     from .profiles import select_profile, synthesize_workflow
     selection = select_profile(model, state.requested_profile)
@@ -155,6 +248,13 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
     # external definition file, synthesize one so the crate conforms (SPEC §16).
     synthesize_workflow(model)
     return model
+
+
+def _bash_command(payload: dict[str, Any]) -> str:
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict):
+        return str(tool_input.get("command", ""))
+    return ""
 
 
 def _engine_for_path(path: str) -> str:
