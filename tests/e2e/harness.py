@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Optional
@@ -138,29 +139,42 @@ def _seed(workdir: Path, spec: ScenarioSpec) -> None:
 
 
 def claude_launcher(spec: ScenarioSpec, workdir: Path, env: dict) -> tuple[int, str]:
-    """Launch a real headless claude session for the scenario."""
-    cmd = [
-        "claude", "-p", spec.prompt,
+    """Launch a real headless claude session for the scenario.
+
+    Resilient to a momentarily-missing `claude` binary: the Claude Code CLI auto-updates
+    itself by swapping its symlink, leaving brief windows where `claude` is not on PATH.
+    Without retry a whole concurrent run would fail with FileNotFoundError mid-flight (an
+    environmental flap, not a scenario failure). Resolve the binary per attempt and retry.
+    """
+    tail = [
+        "-p", spec.prompt,
         "--model", spec.model,
         "--permission-mode", "bypassPermissions",
         "--add-dir", str(workdir),
     ]
     if spec.append_system_prompt:
-        cmd += ["--append-system-prompt", spec.append_system_prompt]
-    try:
-        proc = subprocess.run(
-            cmd, cwd=workdir, env=env, capture_output=True, text=True,
-            timeout=spec.timeout, stdin=subprocess.DEVNULL,
-        )
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout or ""
-        err = exc.stderr or ""
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
-        if isinstance(err, bytes):
-            err = err.decode("utf-8", "replace")
-        return 124, f"TIMEOUT after {spec.timeout}s\n{out}{err}"
+        tail += ["--append-system-prompt", spec.append_system_prompt]
+    last_err: Optional[Exception] = None
+    for _attempt in range(6):
+        claude_bin = shutil.which("claude", path=env.get("PATH")) or "claude"
+        try:
+            proc = subprocess.run(
+                [claude_bin, *tail], cwd=workdir, env=env, capture_output=True, text=True,
+                timeout=spec.timeout, stdin=subprocess.DEVNULL,
+            )
+            return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        except FileNotFoundError as exc:
+            last_err = exc
+            time.sleep(2.0)  # binary briefly gone (auto-update symlink swap); resolve + retry
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout or ""
+            err = exc.stderr or ""
+            if isinstance(out, bytes):
+                out = out.decode("utf-8", "replace")
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", "replace")
+            return 124, f"TIMEOUT after {spec.timeout}s\n{out}{err}"
+    return 127, f"claude binary unavailable after retries (environmental): {last_err}"
 
 
 def rcr_json(args: list, workdir: Path, env: dict) -> Optional[dict]:
