@@ -72,6 +72,32 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
     decision_events = [e for e in ctx.events if e.get("event_type") == "human.decision"]
     if param_events and not decision_events:
         findings.append(ValidationFinding("reproducibility", "missing_parameter_rationale", "Parameters declared without any human rationale"))
+    # 11. Declared output with no producing Action (lineage gap). An output the agent
+    #     wrote (file.* -> CreateAction) or produced via `rcr run --outputs` links here;
+    #     a separately-declared output with no producer is flagged so the gap is visible.
+    if ctx.metadata:
+        produced: set[str] = set()
+        for entity in ctx.metadata.get("@graph", []):
+            types = entity.get("@type", [])
+            types = types if isinstance(types, list) else [types]
+            if not any(str(t).endswith("Action") for t in types):
+                continue
+            result = entity.get("result") or []
+            result = result if isinstance(result, list) else [result]
+            for ref in result:
+                if isinstance(ref, dict) and ref.get("@id"):
+                    produced.add(str(ref["@id"]))
+        for declared in ctx.state.declared_outputs:
+            path = str(declared.get("path", ""))
+            if (
+                path
+                and path not in produced
+                and str(declared.get("existence", "")) in {"generated", "observed local"}
+            ):
+                findings.append(ValidationFinding(
+                    "reproducibility", "output_without_producer",
+                    f"Declared output has no producing action (lineage gap): {path}", path=path,
+                ))
     # 10. Stale crate (SPEC §18.3)
     if ctx.state.dirty:
         warn(
