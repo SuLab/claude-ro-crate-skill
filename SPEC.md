@@ -486,6 +486,17 @@ rcr hash PATH_OR_URI
 6. Append `run.started` and `environment.observed` events.
 7. Perform an initial checkpoint unless `--no-checkpoint` is provided.
 
+Because step 3 creates state/journal only *if absent*, a second `rcr start` invoked while
+state already exists MUST NOT recreate it (that would orphan the journal — a fresh
+`initial_state` resets `run_id`/`sequence` while the existing `events.ndjson` keeps its
+entries, breaking the hash chain). Instead:
+
+- If the existing run is still active (no terminal `run.finalized`/`run.aborted` event), the
+  duplicate `start` is idempotent: reconcile state from the journal and (unless
+  `--no-checkpoint`) checkpoint the existing run; all other arguments are ignored.
+- If the existing run is closed (a terminal event is present), archive it under
+  `.ro-crate-run/archive/<run_id>/` and bootstrap a fresh run on a clean hash chain.
+
 ### 9.4 `rcr resume`
 
 `rcr resume` MUST:
@@ -1180,6 +1191,17 @@ Recommended file metadata:
 ```
 
 Use `exampleOfWork` only when mapping a concrete file/value to a declared `FormalParameter`.
+
+The declared existence state (§11: observed local/remote, generated, expected, missing,
+declared-only) MUST be materialized on the file/dataset entity as an `additionalProperty`
+`PropertyValue` with `propertyID` `existence`, so a crate consumer can distinguish an
+observed input from an expected-but-absent output without the journal.
+
+Every declared input and output MUST be reachable from the root data entity. Declared
+outputs and included files appear in `hasPart`; a declared input that policy does not copy
+into the crate (e.g. an external/by-reference dataset) is referenced via `mentions`. A
+declared file that is emitted but referenced by nothing (an orphan) is non-conformant — the
+information it carries is invisible to a consumer walking down from the root.
 
 ### 15.7 Software and workflow definitions
 
