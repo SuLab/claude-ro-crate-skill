@@ -117,3 +117,28 @@ def test_run_is_active_false_after_finalize(tmp_path: Path) -> None:
     assert run_is_active(state_dir) is True
     EventWriter(state_dir).append("run.finalized", {}, source_kind="skill_command")
     assert run_is_active(state_dir) is False
+
+
+def test_duplicate_start_does_not_clobber_active_run(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A second `rcr start` on an active run MUST NOT rewrite state.json with a fresh
+    # initial_state — that orphans the journal (new run_id, reset sequence) and breaks
+    # the hash chain. It must be idempotent: same run_id, single run.started, clean journal.
+    from ro_crate_run.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Dup", "--mode", "advisory", "--profile", "auto", "--no-checkpoint"]) == 0
+    state_dir = tmp_path / ".ro-crate-run"
+    first_run_id = load_state(state_dir).run_id
+    EventWriter(state_dir).append("human.note", {"text": "mid"}, source_kind="human_cli")
+
+    # Duplicate start, same args AND different args — neither may corrupt the run.
+    assert main(["start", "Dup", "--mode", "advisory", "--profile", "auto", "--no-checkpoint"]) == 0
+    assert main(["start", "Other", "--mode", "enforced", "--profile", "workflow", "--no-checkpoint"]) == 0
+
+    assert load_state(state_dir).run_id == first_run_id, "run_id changed — state was clobbered"
+    types = [e["event_type"] for e in read_events(state_dir)]
+    assert types.count("run.started") == 1, f"expected one run.started, got {types}"
+    # The journal still recovers without a fatal hash/sequence break.
+    result = recover_state(state_dir)
+    assert result.fatal is False
+    assert "journal.repair.failed" not in [e.event_type for e in result.events]

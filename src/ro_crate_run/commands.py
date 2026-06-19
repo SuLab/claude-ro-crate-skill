@@ -19,7 +19,7 @@ from .git import observe_git_state
 from .journal import EventWriter
 from .materialize.builder import checkpoint
 from .models import RcrState
-from .recovery import recover_state
+from .recovery import ensure_recovered, is_active_run, recover_state
 from .redact import redact_run
 from .redaction import Redactor, redaction_event_payload
 from .runner import CommandRunner
@@ -30,6 +30,7 @@ from .state import (
     initial_state,
     load_config,
     load_state,
+    read_events,
     update_state,
     write_config,
     write_id_map,
@@ -128,6 +129,23 @@ def _bootstrap_run(
 
 def start(title: str, mode: str, profile: str, no_checkpoint: bool = False) -> int:
     ctx = ProjectContext.from_cwd()
+    # SPEC §9.3: state.json / events.ndjson are created "if absent". If a run is already
+    # active, a second `rcr start` MUST NOT clobber state.json with a fresh initial_state —
+    # that orphans the existing journal (new run_id + reset sequence) and breaks the hash
+    # chain (non-monotonic sequence, previous-hash mismatch). Treat a duplicate start as
+    # idempotent: reconcile state from the authoritative journal and (optionally)
+    # checkpoint the existing run instead of corrupting it.
+    if (ctx.state_dir / "state.json").exists() and is_active_run(read_events(ctx.state_dir)):
+        ensure_recovered(ctx.state_dir)
+        existing = load_state(ctx.state_dir)
+        print(
+            f"A run is already active ({existing.run_id}); ignoring duplicate 'rcr start'. "
+            "Use 'rcr resume' to continue or 'rcr abort' to end it first.",
+            file=sys.stderr,
+        )
+        if not no_checkpoint:
+            return checkpoint(ctx.state_dir, requested_profile=profile)
+        return 0
     state_dir = _bootstrap_run(ctx, title, mode, profile)
     if not no_checkpoint:
         return checkpoint(state_dir, requested_profile=profile)
