@@ -740,11 +740,13 @@ def install_project(target: str, force: bool = False) -> int:
     claude = target_root / ".claude"
     (claude / "skills").mkdir(parents=True, exist_ok=True)
     (claude / "hooks").mkdir(parents=True, exist_ok=True)
-    dest_skill = claude / "skills" / "ro-crate-run"
-    if dest_skill.exists() and force:
-        shutil.rmtree(dest_skill)
-    if not dest_skill.exists():
-        _copy_resource_tree(_asset_root() / "skills" / "ro-crate-run", dest_skill)
+    # Both skills ship in the asset payload (CLAUDE.md sync table); install both.
+    for skill_name in ("ro-crate-run", "ro-crate-run-admin"):
+        dest_skill = claude / "skills" / skill_name
+        if dest_skill.exists() and force:
+            shutil.rmtree(dest_skill)
+        if not dest_skill.exists():
+            _copy_resource_tree(_asset_root() / "skills" / skill_name, dest_skill)
     for hook in (_asset_root() / "hooks").iterdir():
         if hook.name.startswith("rocrate_") and hook.name.endswith(".py"):
             _copy_resource_file(hook, claude / "hooks" / hook.name, executable=True)
@@ -827,6 +829,20 @@ def _vendor_package(package_root: Path, destination: Path) -> None:
         target = destination / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(item.read_bytes())
+    # The plugin-layout assets (hooks/skills/templates) are installed separately, but the
+    # vendored package itself MUST carry assets/contexts/ — validation's L2 JSON-LD
+    # expansion loads the vendored RO-Crate / workflow-run contexts via
+    # resources.files("ro_crate_run") / "assets" / "contexts". Without them a vendored
+    # (.claude/lib) deployment cannot expand JSON-LD and L2 validation breaks.
+    for rel_dir in (Path("assets"), Path("assets") / "contexts"):
+        src_dir = package_root / rel_dir
+        if not src_dir.is_dir():
+            continue
+        for item in src_dir.iterdir():
+            if item.is_file() and "__pycache__" not in item.parts:
+                target = destination / rel_dir / item.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(item.read_bytes())
 
 
 def _merge_settings(existing: dict[str, Any], fragment: dict[str, Any]) -> dict[str, Any]:
