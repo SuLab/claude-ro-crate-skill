@@ -14,11 +14,6 @@ from ro_crate_run.context import ProjectContext
 # behavior and is backed by a test proving it. This module pins the previously
 # untested flags by setting each to a non-default value and asserting the
 # materialized crate / validation report differs from the default.
-#
-# Two flags listed for coverage are intentionally NOT asserted here because they
-# do not (currently) change behavior on their own — see test_dead_flags below:
-#   * hash_policy.hash_large_files — read by no runtime code (only max_file_size_mb
-#     gates hashing).
 # ---------------------------------------------------------------------------
 
 
@@ -293,22 +288,23 @@ def test_include_source_code_never_excludes_source(tmp_path: Path, monkeypatch) 
 
 
 # ---------------------------------------------------------------------------
-# Dead flag: documents that hash_policy.hash_large_files is read by no runtime
-# code. If this assertion ever fails, the flag became live and deserves a real
-# behavior test above (and removal from this guard).
+# hash_policy.hash_large_files — overrides the max_file_size_mb hash gate: a file
+# that would be skipped for size is hashed anyway when this flag is set.
 # ---------------------------------------------------------------------------
 
 
-def test_hash_large_files_is_currently_dead() -> None:
-    import ro_crate_run.files as files_mod
-    import ro_crate_run.materialize.builder as builder_mod
-    import ro_crate_run.materialize.files as mat_files_mod
-
-    sources = "\n".join(
-        Path(mod.__file__).read_text()
-        for mod in (files_mod, builder_mod, mat_files_mod)
-    )
-    assert "hash_large_files" not in sources, (
-        "hash_large_files is now referenced by runtime code; give it a real "
-        "behavior-changing test and drop this dead-flag guard."
-    )
+def test_hash_large_files_overrides_size_gate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Demo", "--no-checkpoint"]) == 0
+    (tmp_path / "big.bin").write_bytes(b"x" * 200_000)
+    assert main(["output", "big.bin", "--copy"]) == 0
+    # Size gate makes the file unhashable...
+    _write_config(lambda c: c["hash_policy"].__setitem__("max_file_size_mb", 0))
+    assert main(["checkpoint"]) == 0
+    assert "identifier" not in _by_id(_graph())["big.bin"], "expected size-gated (no hash)"
+    # ...but hash_large_files=True overrides the gate and hashes it anyway.
+    _write_config(lambda c: c["hash_policy"].__setitem__("hash_large_files", True))
+    assert main(["checkpoint"]) == 0
+    entity = _by_id(_graph())["big.bin"]
+    assert (entity.get("identifier") or {}).get("propertyID") == "sha256", \
+        f"hash_large_files did not override the size gate: {entity}"

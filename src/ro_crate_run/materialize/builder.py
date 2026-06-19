@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -190,7 +191,11 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     graph.extend(wf_params)
 
     # --- Files (declared inputs/outputs + command outputs) ---
-    max_hash_bytes = cfg.hash_policy.max_file_size_mb * 1024 * 1024
+    # hash_policy.hash_large_files overrides the size gate: hash files of ANY size.
+    max_hash_bytes = (
+        sys.maxsize if cfg.hash_policy.hash_large_files
+        else cfg.hash_policy.max_file_size_mb * 1024 * 1024
+    )
     plans = {plan.file_id: plan for plan in plan_file_inclusion(model, cfg, project_dir)}
     file_ids: set[str] = set()
 
