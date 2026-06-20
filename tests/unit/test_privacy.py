@@ -53,6 +53,18 @@ def test_scan_crate_secrets_clean(tmp_path: Path) -> None:
     assert scan_crate_secrets(crate, Redactor.default()) == []
 
 
+def test_scan_crate_secrets_does_not_fail_open_on_binary(tmp_path: Path) -> None:
+    # A secret embedded in an otherwise-binary (non-UTF-8) file must still be flagged — the
+    # scanner must not skip the file on UnicodeDecodeError (that would fail the gate open).
+    crate = tmp_path / "crate"
+    crate.mkdir()
+    blob = b"\x00\x01\xff\xfe binary noise " + b"AKIAIOSFODNN7EXAMPLE" + b"\x80\x81\x00"
+    (crate / "model.bin").write_bytes(blob)
+    findings = scan_crate_secrets(crate, Redactor.default())
+    assert any(f.code == "secret_pattern" for f in findings), \
+        "secret in a binary file was not detected (gate failed open)"
+
+
 # --- journal_findings ---
 
 

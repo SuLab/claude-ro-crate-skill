@@ -15,9 +15,14 @@ def scan_crate_secrets(crate_dir: Path, redactor: Redactor) -> list[ValidationFi
         if not path.is_file():
             continue
         try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+            raw = path.read_bytes()
+        except OSError:
             continue
+        # Decode latin-1 (lossless byte->char) rather than skipping non-UTF-8 files: an
+        # ASCII secret embedded in an otherwise-binary blob must NOT make the gate fail open
+        # (a UnicodeDecodeError previously skipped the whole file). ASCII secret patterns
+        # still match under latin-1; only a truly unreadable file (OSError) is skipped.
+        text = raw.decode("latin-1")
         if redactor.redact_text(text).applied:
             rel = path.relative_to(crate_dir).as_posix()
             findings.append(
