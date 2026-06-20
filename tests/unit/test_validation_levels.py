@@ -305,6 +305,35 @@ def test_shacl_flags_nonconformance_under_strict(tmp_path: Path, monkeypatch) ->
     assert check_shacl(build_context(state_dir, strict=True, public=False)) == []
 
 
+def test_bundled_shacl_shapes_validate_real_crate(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The shipped ro-crate-shacl.ttl must load, conform on a real crate under --strict, and
+    # flag a structurally-broken one (a CreateAction with no agent).
+    import pytest
+    pytest.importorskip("pyshacl")
+    from ro_crate_run.validation.shacl import _load_shapes_graph
+
+    assert _load_shapes_graph() is not None, "ro-crate-shacl.ttl must ship in the package"
+    state_dir = _start(tmp_path, monkeypatch)
+    assert main(["software", "python3", "--version", "3.12"]) == 0
+    assert main(["run", "--outputs", "o.txt", "--", "python3", "-c",
+                 "open('o.txt','w').write('x\\n')"]) == 0
+    assert main(["output", "o.txt", "--role", "result"]) == 0
+    assert main(["checkpoint"]) == 0
+    assert check_shacl(build_context(state_dir, strict=True, public=False)) == [], \
+        "a valid crate must conform to the bundled shapes"
+
+    man = state_dir / "ro-crate" / "ro-crate-metadata.json"
+    doc = _json.loads(man.read_text())
+    for e in doc["@graph"]:
+        t = e.get("@type")
+        if "CreateAction" in (t if isinstance(t, list) else [t]):
+            e.pop("agent", None)
+    man.write_text(_json.dumps(doc))
+    findings = check_shacl(build_context(state_dir, strict=True, public=False))
+    assert any(f.code == "shacl_nonconformant" for f in findings), \
+        "bundled shapes did not flag a CreateAction missing its agent"
+
+
 # --- validate_run orchestrator tests ---
 
 

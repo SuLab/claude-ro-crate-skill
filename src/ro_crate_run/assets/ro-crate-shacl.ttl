@@ -1,0 +1,48 @@
+# SHACL shapes for RO-Crate 1.2 + Process/Workflow/Provenance Run Crate 0.5.
+#
+# These run only under `rcr validate --strict` with the [shacl] extra installed. They are
+# applied to the crate after JSON-LD expansion (RO-Crate terms expand to schema.org), so the
+# shapes target schema.org classes. They encode universal structural invariants that every
+# conformant crate this tool emits MUST satisfy — deliberately conservative so a valid crate
+# is never flagged, while a structurally-broken one (missing agent/actionStatus/name) is.
+
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix schema:  <http://schema.org/> .
+@prefix prof:    <http://www.w3.org/ns/dx/prof/> .
+@prefix rcsh:    <https://w3id.org/ro/crate/shapes#> .
+
+# --- Provenance actions: a Create/Update/Delete action records WHO did it and its outcome ---
+rcsh:CreateActionShape a sh:NodeShape ;
+    sh:targetClass schema:CreateAction ;
+    sh:property [ sh:path schema:agent ;        sh:minCount 1 ;
+                  sh:message "A CreateAction must record an agent." ] ;
+    sh:property [ sh:path schema:actionStatus ; sh:minCount 1 ;
+                  sh:message "A CreateAction must record an actionStatus." ] .
+
+rcsh:UpdateActionShape a sh:NodeShape ;
+    sh:targetClass schema:UpdateAction ;
+    sh:property [ sh:path schema:agent ;        sh:minCount 1 ] ;
+    sh:property [ sh:path schema:actionStatus ; sh:minCount 1 ] .
+
+rcsh:DeleteActionShape a sh:NodeShape ;
+    sh:targetClass schema:DeleteAction ;
+    sh:property [ sh:path schema:agent ;        sh:minCount 1 ] ;
+    sh:property [ sh:path schema:actionStatus ; sh:minCount 1 ] .
+
+# --- A Person actor must be nameable ---
+rcsh:PersonShape a sh:NodeShape ;
+    sh:targetClass schema:Person ;
+    sh:property [ sh:path schema:name ; sh:minCount 1 ;
+                  sh:message "A Person actor must have a name." ] .
+
+# --- The conformance Profile entity must be named ---
+rcsh:ProfileShape a sh:NodeShape ;
+    sh:targetClass prof:Profile ;
+    sh:property [ sh:path schema:name ; sh:minCount 1 ;
+                  sh:message "A Profile entity must have a name." ] .
+
+# --- A PropertyValue must carry a value (sha256 digest, existence, git branch, etc.) ---
+rcsh:PropertyValueShape a sh:NodeShape ;
+    sh:targetClass schema:PropertyValue ;
+    sh:property [ sh:path schema:value ; sh:minCount 1 ;
+                  sh:message "A PropertyValue must carry a value." ] .
