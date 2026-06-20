@@ -8,6 +8,7 @@ import json
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -124,6 +125,29 @@ def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
     except Exception as exc:
         writer.append("crate.checkpoint.failed", {"error": str(exc)}, source_kind="materializer")
         raise
+
+
+@dataclass
+class _WriteCtx:
+    """Shared mutable state threaded through the section helpers of write_crate.
+
+    Bundles the flattened @graph and root being assembled together with the read-only
+    inputs (model, cfg, paths, id_map, file plans, formal-parameter map, hash gate,
+    publish timestamp) and the cross-section ``file_ids`` accumulator, so the extracted
+    helpers compose into write_crate without long uniform signatures."""
+
+    graph: list[dict[str, Any]]
+    root: dict[str, Any]
+    model: RunModel
+    cfg: Any
+    crate_dir: Path
+    project_dir: Path
+    id_map: IdMap
+    plans: dict[str, FilePlan]
+    formal_param_map: dict[str, str]
+    file_ids: set[str]
+    max_hash_bytes: int
+    published_at: str
 
 
 def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str] = None) -> None:
@@ -263,6 +287,20 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     )
     plans = {plan.file_id: plan for plan in plan_file_inclusion(model, cfg, project_dir)}
     file_ids: set[str] = set()
+    ctx = _WriteCtx(
+        graph=graph,
+        root=root,
+        model=model,
+        cfg=cfg,
+        crate_dir=crate_dir,
+        project_dir=project_dir,
+        id_map=id_map,
+        plans=plans,
+        formal_param_map=formal_param_map,
+        file_ids=file_ids,
+        max_hash_bytes=max_hash_bytes,
+        published_at=published_at,
+    )
 
     for plan in plans.values():
         fp_id = formal_param_map.get(str(plan.declared.get("path", plan.file_id)))
@@ -307,54 +345,7 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
 
     # --- Command actions ---
     for command in model.commands:
-        entities = mapping.build_command_action(command, id_map, project_dir)
-        graph.extend(entities)
-        # Reference the action AND its sidecar/log File entities from the root so the
-        # command's invocation record + logs are reachable (they carry about->action, but
-        # that alone leaves them undiscoverable by a downward walk from the root).
-        for e in entities:
-            root["mentions"].append({"@id": e["@id"]})
-        # Copy logs/sidecars
-        for rel in (command.sidecar, command.stdout_log, command.stderr_log):
-            if rel and log_should_copy(rel, project_dir, cfg):
-                _copy_into_crate(project_dir / rel, crate_dir / rel)
-        # Ensure command outputs appear as file entities even when not in plans
-        for output in command.outputs:
-            output_id = relative_file_id(Path(output), project_dir)
-            if output_id not in file_ids:
-                output_plan = plans.get(output_id)
-                if output_plan is not None:
-                    fp_id2 = formal_param_map.get(str(output_plan.declared.get("path", output_id)))
-                    graph.append(mapping.build_file_entity(output_plan, max_hash_bytes, fp_id2))
-                    if output_plan.included:
-                        root["hasPart"].append({"@id": output_id})
-                    if output_plan.copy:
-                        _copy_into_crate(output_plan.abs_path, crate_dir / output_id)
-                else:
-                    # Fallback: emit a minimal File entity for undeclared outputs.
-                    fallback = FilePlan(
-                        file_id=output_id,
-                        abs_path=project_dir / output,
-                        declared={"path": output, "description": "Command output"},
-                    )
-                    graph.append(mapping.build_file_entity(fallback, max_hash_bytes))
-                    root["hasPart"].append({"@id": output_id})
-                file_ids.add(output_id)
-        # Ensure command inputs referenced as the action's `object` have File entities
-        # even when not separately declared via `rcr input` (otherwise the object ref
-        # would dangle). Inputs are not forced into hasPart — they are referenced only.
-        for input_path in command.inputs:
-            input_id = relative_file_id(Path(input_path), project_dir)
-            if input_id in file_ids or input_id.startswith("#") or is_web_id(input_id):
-                file_ids.add(input_id)
-                continue
-            input_plan = FilePlan(
-                file_id=input_id,
-                abs_path=project_dir / input_path,
-                declared={"path": input_path, "description": "Command input"},
-            )
-            graph.append(mapping.build_file_entity(input_plan, max_hash_bytes))
-            file_ids.add(input_id)
+        _emit_command_file_entities(ctx, command)
 
     # --- Agent action families (SPEC §16: the Claude agent's actions ARE the workflow) ---
     agent_action_entities = mapping.build_agent_actions(model, project_dir, file_ids)
@@ -366,22 +357,7 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
             root["mentions"].append({"@id": e["@id"]})
 
     # --- Weave the agent's actions INTO the synthesized workflow as ordered steps ---
-    # When the workflow is synthesized (no external definition file) and the agent did not
-    # declare explicit rcr steps, the workflow's steps ARE the agent's execution-shaped
-    # actions (commands + file edits + raw commands + subagent dispatches) in time order.
-    if workflow_entities and model.workflow and model.workflow.get("synthetic") and not model.steps:
-        command_action_ids = {c.action_id for c in model.commands}
-        timeline = [
-            e for e in graph
-            if e.get("@id") in command_action_ids
-            or str(e.get("@id", "")).startswith(("#file-action/", "#raw-command/", "#subagent/"))
-        ]
-        timeline.sort(key=lambda e: (str(e.get("startTime", "")), str(e.get("@id", ""))))
-        ordered = [(str(e["@id"]), str(e.get("name", "step"))) for e in timeline]
-        step_entities, step_refs = mapping.build_workflow_timeline(ordered)
-        if step_refs:
-            graph.extend(step_entities)
-            workflow_entities[0]["step"] = step_refs
+    _weave_synthetic_workflow_steps(ctx, workflow_entities)
 
     # --- Notes, decisions, parameter connections ---
     note_decision = mapping.build_notes_decisions(model)
@@ -461,6 +437,104 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     (crate_dir / "run-summary.json").write_text(
         json.dumps(run_summary(model), indent=2, sort_keys=True) + "\n"
     )
+
+
+def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
+    """Emit a single command's action + its sidecar/log/output/input File entities.
+
+    Extends ctx.graph with the command's ProcessRun action and references it (plus its
+    sidecar/log Files) from root mentions; copies logs/sidecars into the crate; and ensures
+    every command output (hasPart) and referenced input (mentions-only) has a File entity,
+    reusing a matching FilePlan when present and otherwise emitting a minimal fallback. Uses
+    and updates the cross-command ctx.file_ids accumulator."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    root = ctx.root
+    id_map = ctx.id_map
+    project_dir = ctx.project_dir
+    crate_dir = ctx.crate_dir
+    cfg = ctx.cfg
+    plans = ctx.plans
+    formal_param_map = ctx.formal_param_map
+    file_ids = ctx.file_ids
+    max_hash_bytes = ctx.max_hash_bytes
+
+    entities = mapping.build_command_action(command, id_map, project_dir)
+    graph.extend(entities)
+    # Reference the action AND its sidecar/log File entities from the root so the
+    # command's invocation record + logs are reachable (they carry about->action, but
+    # that alone leaves them undiscoverable by a downward walk from the root).
+    for e in entities:
+        root["mentions"].append({"@id": e["@id"]})
+    # Copy logs/sidecars
+    for rel in (command.sidecar, command.stdout_log, command.stderr_log):
+        if rel and log_should_copy(rel, project_dir, cfg):
+            _copy_into_crate(project_dir / rel, crate_dir / rel)
+    # Ensure command outputs appear as file entities even when not in plans
+    for output in command.outputs:
+        output_id = relative_file_id(Path(output), project_dir)
+        if output_id not in file_ids:
+            output_plan = plans.get(output_id)
+            if output_plan is not None:
+                fp_id2 = formal_param_map.get(str(output_plan.declared.get("path", output_id)))
+                graph.append(mapping.build_file_entity(output_plan, max_hash_bytes, fp_id2))
+                if output_plan.included:
+                    root["hasPart"].append({"@id": output_id})
+                if output_plan.copy:
+                    _copy_into_crate(output_plan.abs_path, crate_dir / output_id)
+            else:
+                # Fallback: emit a minimal File entity for undeclared outputs.
+                fallback = FilePlan(
+                    file_id=output_id,
+                    abs_path=project_dir / output,
+                    declared={"path": output, "description": "Command output"},
+                )
+                graph.append(mapping.build_file_entity(fallback, max_hash_bytes))
+                root["hasPart"].append({"@id": output_id})
+            file_ids.add(output_id)
+    # Ensure command inputs referenced as the action's `object` have File entities
+    # even when not separately declared via `rcr input` (otherwise the object ref
+    # would dangle). Inputs are not forced into hasPart — they are referenced only.
+    for input_path in command.inputs:
+        input_id = relative_file_id(Path(input_path), project_dir)
+        if input_id in file_ids or input_id.startswith("#") or is_web_id(input_id):
+            file_ids.add(input_id)
+            continue
+        input_plan = FilePlan(
+            file_id=input_id,
+            abs_path=project_dir / input_path,
+            declared={"path": input_path, "description": "Command input"},
+        )
+        graph.append(mapping.build_file_entity(input_plan, max_hash_bytes))
+        file_ids.add(input_id)
+
+
+def _weave_synthetic_workflow_steps(
+    ctx: _WriteCtx, workflow_entities: list[dict[str, Any]]
+) -> None:
+    """Weave the agent's actions INTO the synthesized workflow as ordered steps.
+
+    When the workflow is synthesized (no external definition file) and the agent did not
+    declare explicit rcr steps, the workflow's steps ARE the agent's execution-shaped
+    actions (commands + file edits + raw commands + subagent dispatches) in time order."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    model = ctx.model
+    if workflow_entities and model.workflow and model.workflow.get("synthetic") and not model.steps:
+        command_action_ids = {c.action_id for c in model.commands}
+        timeline = [
+            e for e in graph
+            if e.get("@id") in command_action_ids
+            or str(e.get("@id", "")).startswith(("#file-action/", "#raw-command/", "#subagent/"))
+        ]
+        timeline.sort(key=lambda e: (str(e.get("startTime", "")), str(e.get("@id", ""))))
+        ordered = [(str(e["@id"]), str(e.get("name", "step"))) for e in timeline]
+        step_entities, step_refs = mapping.build_workflow_timeline(ordered)
+        if step_refs:
+            graph.extend(step_entities)
+            workflow_entities[0]["step"] = step_refs
 
 
 def _copy_into_crate(src: Path, dst: Path) -> None:

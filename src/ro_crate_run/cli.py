@@ -8,7 +8,7 @@ import argparse
 import json
 from collections.abc import Sequence
 
-from . import commands
+from . import commands, install
 from .constants import PROFILE_CHOICES
 from .inspect import inspect_crate, inspect_events, mermaid_graph
 
@@ -225,7 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("install-project")
     p.add_argument("--target", default=".")
     p.add_argument("--force", action="store_true")
-    p.set_defaults(func=lambda a: commands.install_project(a.target, a.force))
+    p.set_defaults(func=lambda a: install.install_project(a.target, a.force))
 
     p = sub.add_parser("import-ro-crate")
     p.add_argument("path")

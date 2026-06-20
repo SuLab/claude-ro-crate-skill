@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ro_crate_run import commands
+from ro_crate_run import install
 
 
 def test_install_project_vendors_package(tmp_path: Path) -> None:
-    assert commands.install_project(str(tmp_path)) == 0
+    assert install.install_project(str(tmp_path)) == 0
     vendored = tmp_path / ".claude" / "lib" / "ro_crate_run" / "__init__.py"
     assert vendored.exists(), "package must be vendored under .claude/lib"
     # Skill + hooks still installed.
@@ -21,7 +21,7 @@ def test_install_project_vendors_validation_contexts(tmp_path: Path) -> None:
     # L2 JSON-LD expansion loads the vendored RO-Crate / workflow-run contexts via
     # resources.files("ro_crate_run") / "assets" / "contexts"; the vendored package MUST
     # carry them (and the assets package init) or a vendored deployment cannot validate L2.
-    assert commands.install_project(str(tmp_path)) == 0
+    assert install.install_project(str(tmp_path)) == 0
     assets = tmp_path / ".claude" / "lib" / "ro_crate_run" / "assets"
     assert (assets / "__init__.py").exists(), "assets subpackage not vendored (unimportable)"
     contexts = assets / "contexts"
@@ -31,7 +31,7 @@ def test_install_project_vendors_validation_contexts(tmp_path: Path) -> None:
 
 
 def test_install_project_installs_both_skills(tmp_path: Path) -> None:
-    assert commands.install_project(str(tmp_path)) == 0
+    assert install.install_project(str(tmp_path)) == 0
     skills = tmp_path / ".claude" / "skills"
     assert (skills / "ro-crate-run" / "SKILL.md").exists()
     assert (skills / "ro-crate-run-admin" / "SKILL.md").exists(), "admin skill not installed"

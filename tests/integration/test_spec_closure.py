@@ -3,9 +3,9 @@ import zipfile
 from pathlib import Path
 
 from ro_crate_run.cli import main
-from ro_crate_run.commands import install_project
 from ro_crate_run.events import compute_event_hash
 from ro_crate_run.hooks import handle_hook
+from ro_crate_run.install import install_project
 from ro_crate_run.journal import EventWriter
 from ro_crate_run.state import load_state, write_state
 
