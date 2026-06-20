@@ -18,25 +18,34 @@ def test_detect_snakemake_with_steps(tmp_path: Path) -> None:
 
 def test_detect_cwl(tmp_path: Path) -> None:
     wf = tmp_path / "workflow.cwl"
-    wf.write_text("cwlVersion: v1.2\nclass: Workflow\n")
+    wf.write_text(
+        "cwlVersion: v1.2\nclass: Workflow\nsteps:\n"
+        "  normalize:\n    run: n.cwl\n  summarize:\n    run: s.cwl\n"
+    )
     result = adapters.detect_engine(wf)
     assert result is not None and result["engine"] == "cwl"
+    assert result["steps"] == ["normalize", "summarize"], result["steps"]
 
 
 def test_detect_nextflow(tmp_path: Path) -> None:
     wf = tmp_path / "main.nf"
-    wf.write_text("process FOO { script: 'echo hi' }\n")
+    wf.write_text("process FOO { script: 'echo hi' }\nprocess BAR { script: 'echo bye' }\n")
     result = adapters.detect_engine(wf)
     assert result is not None
     assert result["engine"] == "nextflow"
+    assert result["steps"] == ["FOO", "BAR"], result["steps"]
 
 
 def test_detect_galaxy(tmp_path: Path) -> None:
     wf = tmp_path / "workflow.ga"
-    wf.write_text('{"a_galaxy_workflow": "true", "steps": {}}\n')
+    wf.write_text(
+        '{"a_galaxy_workflow": "true", '
+        '"steps": {"0": {"name": "input"}, "1": {"name": "normalize"}}}\n'
+    )
     result = adapters.detect_engine(wf)
     assert result is not None
     assert result["engine"] == "galaxy"
+    assert result["steps"] == ["input", "normalize"], result["steps"]
 
 
 def test_detect_none(tmp_path: Path) -> None:

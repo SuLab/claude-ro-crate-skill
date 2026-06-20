@@ -300,11 +300,21 @@ def test_standalone_validate_does_not_mark_stale_crate_clean(
 
 
 def test_validate_run_strict_from_config(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # config.validation.strict must genuinely ESCALATE: an empty run (no actions) validates
+    # without errors normally, but strict mode promotes the no_actions profile finding to an
+    # error -> status failed. Asserting the actual divergence (not the whole status universe)
+    # is what catches a regression that silently disables config-strict.
     state_dir = _start(tmp_path, monkeypatch)
+    main(["checkpoint"])
+    lenient = validate_run(state_dir, strict=False, public=False, append_event=False)
+    assert lenient.status != "failed", f"empty run should not fail leniently: {lenient.errors}"
+
     cfg = _json.loads((state_dir / "config.json").read_text())
     cfg["validation"]["strict"] = True
     (state_dir / "config.json").write_text(_json.dumps(cfg))
-    main(["checkpoint"])  # may return 1 under strict mode with no actions
-    report = validate_run(state_dir, strict=False, public=False, append_event=False)
-    assert report.status in {"passed", "warning", "failed"}
-    assert set(report.levels) == {"journal", "state", "ro_crate", "profile", "reproducibility", "privacy"}
+    strict = validate_run(state_dir, strict=False, public=False, append_event=False)
+    assert strict.status == "failed", "config strict=True did not escalate the empty-run findings"
+    assert strict.status != lenient.status, "config-strict produced the same status as lenient"
+    assert set(strict.levels) == {
+        "journal", "state", "ro_crate", "profile", "reproducibility", "privacy"
+    }
