@@ -410,10 +410,13 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
                 "about": {"@id": "./"},
             }
             # L8 (RO-Crate 1.2 SHOULD): File entities SHOULD carry contentSize (bytes).
+            # A captured local File (one with contentSize) MUST also carry dateModified so a
+            # consumer can describe the embedded body (matches the §15.6 core-metadata contract).
             try:
                 journal_entity["contentSize"] = str(journal_src.stat().st_size)
             except OSError:
                 pass
+            journal_entity["dateModified"] = published_at
             graph.append(journal_entity)
             root["hasPart"].append({"@id": journal_rel})
 
@@ -423,18 +426,28 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     root["mentions"].extend({"@id": e["@id"]} for e in decision_entities)
 
     # --- README.md (L3: WfRC SHOULD; harmless for process crates too) ---
+    # Only GENERATE one when the run did not already produce/declare a README.md: writing a
+    # generated README over a captured project README would corrupt that File's recorded
+    # sha256 (an @id collision -> file_content_mismatch). An existing README.md already
+    # satisfies the SHOULD; the H2 pass below ensures it is in hasPart.
     readme_rel = "README.md"
-    _write_readme(crate_dir / readme_rel, model)
-    graph.append(
-        {
+    if readme_rel not in {e.get("@id") for e in graph}:
+        _write_readme(crate_dir / readme_rel, model)
+        readme_entity: dict[str, Any] = {
             "@id": readme_rel,
             "@type": "File",
             "encodingFormat": "text/markdown",
             "name": "Run README",
             "about": {"@id": "./"},
         }
-    )
-    root["hasPart"].append({"@id": readme_rel})
+        try:
+            stat = (crate_dir / readme_rel).stat()
+            readme_entity["contentSize"] = str(stat.st_size)
+            readme_entity["dateModified"] = published_at
+        except OSError:
+            pass
+        graph.append(readme_entity)
+        root["hasPart"].append({"@id": readme_rel})
 
     # --- H2 (RO-Crate 1.2 MUST): every File/Dataset data entity reachable from root hasPart.
     # Data entities are linked, directly or indirectly, from the Root via hasPart.  After the

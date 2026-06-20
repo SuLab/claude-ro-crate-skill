@@ -16,11 +16,16 @@ def _types(entity: dict) -> list:
     return t if isinstance(t, list) else [t]
 
 
-def _file_sha256(entity: dict) -> str | None:
-    # rcr records the digest as a nested identifier PropertyValue (propertyID 'sha256');
-    # there is no top-level 'sha256' key.
+def _file_sha256(entity: dict, graph: list | None = None) -> str | None:
+    # rcr records the digest as an identifier PropertyValue (propertyID 'sha256').
+    # Per RO-Crate 1.2 (no anonymous inlining) the PropertyValue is a top-level
+    # #embedded/* node and the File's identifier is a {"@id": ...} reference, so
+    # resolve the reference against the graph before reading the value.
+    by_id = {e.get("@id"): e for e in (graph or [])}
     ident = entity.get("identifier")
     for cand in (ident if isinstance(ident, list) else [ident]):
+        if isinstance(cand, dict) and set(cand.keys()) == {"@id"}:
+            cand = by_id.get(cand["@id"], cand)
         if isinstance(cand, dict) and cand.get("propertyID") == "sha256":
             v = str(cand.get("value", ""))
             if len(v) == 64:
@@ -122,7 +127,7 @@ def _check_proc_minimal(graph: list, result) -> None:
         "no #software/* SoftwareApplication with a version"
 
     # Output File carries a sha256 digest; a Profile entity backs the root conformsTo.
-    assert any(_file_sha256(f) for f in by_type(graph, "File")), "no File carries a sha256"
+    assert any(_file_sha256(f, graph) for f in by_type(graph, "File")), "no File carries a sha256"
     assert by_type(graph, "Profile"), "no Profile entity backing root conformsTo"
 
 

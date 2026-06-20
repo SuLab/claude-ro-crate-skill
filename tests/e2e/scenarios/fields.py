@@ -26,6 +26,9 @@ def _types(entity: dict) -> list:
 
 
 def _existence_values(graph: list) -> set:
+    # Per RO-Crate 1.2 (no anonymous inlining) additionalProperty PropertyValues are
+    # top-level #embedded/* nodes referenced via {"@id": ...}; resolve the references.
+    by_id = {e.get("@id"): e for e in graph}
     vals: set = set()
     for e in graph:
         if not ({"File", "Dataset"} & set(_types(e))):
@@ -33,6 +36,8 @@ def _existence_values(graph: list) -> set:
         ap = e.get("additionalProperty")
         ap = ap if isinstance(ap, list) else ([ap] if ap else [])
         for p in ap:
+            if isinstance(p, dict) and set(p.keys()) == {"@id"}:
+                p = by_id.get(p["@id"], p)
             if isinstance(p, dict) and p.get("propertyID") == "existence":
                 vals.add(p.get("value"))
     return vals
@@ -107,7 +112,11 @@ def _check_git(graph: list, result) -> None:
     # The scanned dependency manifest is materialized with a verifiable sha256 digest.
     req = entities_by_id(graph).get("requirements.txt")
     assert req is not None, "requirements.txt dependency manifest not materialized"
-    digest = (req.get("identifier") or {}).get("value", "")
+    # identifier is a {"@id": "#embedded/..."} reference to a top-level sha256 PropertyValue.
+    ident = req.get("identifier") or {}
+    if set(ident.keys()) == {"@id"}:
+        ident = entities_by_id(graph).get(ident["@id"], ident)
+    digest = ident.get("value", "")
     assert len(str(digest)) == 64, f"dependency manifest missing sha256: {req}"
     # include_git_diff=always over a dirty tree must materialize the diff/patch as a File whose
     # `about` points back at the git state, so the captured patch is reachable provenance.
