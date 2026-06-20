@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ro_crate_run.cli import main
 from ro_crate_run.signing import generate_keypair, sign_manifest, verify_manifest_signature
 from ro_crate_run.validation.validator import validate_run
@@ -55,6 +57,7 @@ def test_validation_fails_root_missing_license(tmp_path: Path, monkeypatch) -> N
 
 
 def test_manifest_signature_round_trip(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
     manifest = tmp_path / "manifest.json"
     manifest.write_text('{"sha256":"abc"}')
     private_key, public_key = generate_keypair()
