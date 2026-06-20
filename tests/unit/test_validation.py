@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from ro_crate_run.cli import main
-from ro_crate_run.preview import render_preview_html
 from ro_crate_run.signing import generate_keypair, sign_manifest, verify_manifest_signature
 from ro_crate_run.validation.validator import validate_run
 
@@ -53,12 +52,6 @@ def test_validation_fails_root_missing_license(tmp_path: Path, monkeypatch) -> N
 
     assert report.status == "failed"
     assert any(err.code == "root_missing_license" for err in report.errors)
-
-
-def test_preview_html_contains_run_title() -> None:
-    html = render_preview_html({"title": "Preview Demo", "commands": [], "outputs": []})
-    assert "<title>Preview Demo</title>" in html
-    assert "RO-Crate Run Preview" in html
 
 
 def test_manifest_signature_round_trip(tmp_path: Path) -> None:

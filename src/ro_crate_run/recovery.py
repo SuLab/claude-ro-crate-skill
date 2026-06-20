@@ -1,3 +1,11 @@
+"""Treat the journal as authoritative and rebuild/repair derived state.
+
+Runs at the top of every CLI command and hook startup: it repairs a partial
+trailing line, reconciles a lagged ``state.json`` to the journal, and marks
+abandoned commands blocked. ``is_active_run`` is the single source for whether a
+run is still active.
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +15,7 @@ from typing import Any
 
 from filelock import FileLock
 
-from .events import compute_event_hash, event_from_dict
+from .events import compute_event_hash, dump_event_line, event_from_dict
 from .journal import EventWriter
 from .models import RcrEvent
 from .state import load_state, write_state
@@ -172,10 +180,7 @@ def _read_events_repairing_partial_line(
         except json.JSONDecodeError as exc:
             if idx == len(lines) - 1:
                 path.write_text(
-                    "".join(
-                        json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
-                        for event in parsed
-                    ),
+                    "".join(dump_event_line(event) for event in parsed),
                     encoding="utf-8",
                 )
                 repaired = True

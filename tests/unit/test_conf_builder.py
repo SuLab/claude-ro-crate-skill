@@ -1,17 +1,17 @@
-"""Conformance regression coverage for the builder.py RO-Crate fixes (Agent A slice).
+"""Conformance regression coverage for the builder.py RO-Crate output.
 
 Each test GENERATES a real crate via the CLI and inspects the emitted
-ro-crate-metadata.json, asserting the fix takes effect:
+ro-crate-metadata.json, asserting the expected structure:
 
-  H1  no anonymous inline typed node — every nested typed dict is a top-level entity with
-      an @id, and the crate re-loads via ro-crate-py without raising.
-  H2  every relative-@id File/Dataset data entity is linked from the root via hasPart.
-  L1  the contextual Profile entity's @type is ["CreativeWork", "Profile"].
-  L3  a workflow/provenance crate also declares the Process Run Crate 0.5 + Workflow
-      RO-Crate 1.0 profiles (each with a matching Profile entity), and emits a README.md.
-  L8  the event-journal File carries contentSize.
-  L6  captured human decisions are materialized as ChooseAction/CreativeWork attributed to
-      the human, referenced from the root's mentions.
+  - no anonymous inline typed node — every nested typed dict is a top-level entity with
+    an @id, and the crate re-loads via ro-crate-py without raising.
+  - every relative-@id File/Dataset data entity is linked from the root via hasPart.
+  - the contextual Profile entity's @type is ["CreativeWork", "Profile"].
+  - a workflow/provenance crate also declares the Process Run Crate 0.5 + Workflow
+    RO-Crate 1.0 profiles (each with a matching Profile entity), and emits a README.md.
+  - the event-journal File carries contentSize.
+  - captured human decisions are materialized as ChooseAction/CreativeWork attributed to
+    the human, referenced from the root's mentions.
 """
 from __future__ import annotations
 
@@ -225,21 +225,21 @@ def test_l6_build_tool_decisions_helper() -> None:
     )
 
     ents = _build_tool_decisions(model)
-    ask = next(e for e in ents if e["@id"] == "#decision/5")
+    ask = next(e for e in ents if e["@id"] == "#tool-decision/5")
     assert ask["@type"] == "ChooseAction"
     assert ask["agent"] == {"@id": "#actor/human"}
     assert ask["result"] == "a"
     assert ask["object"] == "Pick one"
     assert [p["value"] for p in ask["additionalProperty"]] == ["a", "b"]
 
-    plan = next(e for e in ents if e["@id"] == "#decision/7")
+    plan = next(e for e in ents if e["@id"] == "#tool-decision/7")
     assert plan["@type"] == ["CreativeWork"]
     assert plan["creator"] == {"@id": "#actor/human"}
     assert plan["text"] == "do X then Y"
 
 
 def test_l6_build_tool_decisions_defensive_without_field() -> None:
-    # Builder must tolerate a model that predates Agent C's tool_decisions field.
+    # Builder must tolerate a model that lacks the tool_decisions field.
     assert _build_tool_decisions(SimpleNamespace()) == []
 
 
@@ -248,7 +248,7 @@ def test_l6_decisions_materialized_in_crate_and_mentioned(tmp_path: Path, monkey
     _make_process_crate(tmp_path)
     state_dir = tmp_path / ".ro-crate-run"
     model = build_run_model(state_dir, None)
-    # Simulate the field Agent C populates (the contract @id scheme is #decision/<sequence>).
+    # Tool decisions use the #tool-decision/<sequence> @id namespace.
     model.tool_decisions = [  # type: ignore[attr-defined]
         {
             "sequence": 99,
@@ -263,11 +263,11 @@ def test_l6_decisions_materialized_in_crate_and_mentioned(tmp_path: Path, monkey
     graph = _graph(tmp_path)
     by_id = _by_id(graph)
 
-    decision = by_id["#decision/99"]
+    decision = by_id["#tool-decision/99"]
     assert decision["@type"] == "ChooseAction"
     assert decision["agent"] == {"@id": "#actor/human"}
     # Referenced from the root's mentions.
-    assert {"@id": "#decision/99"} in by_id["./"]["mentions"]
+    assert {"@id": "#tool-decision/99"} in by_id["./"]["mentions"]
     # The inline option PropertyValues are node-ified (H1) so the crate still round-trips.
     assert all(set(p.keys()) == {"@id"} for p in decision["additionalProperty"])
     ROCrate(str(state_dir / "ro-crate"))

@@ -1,3 +1,12 @@
+"""Crate finalization and export.
+
+Stages the exact crate that will ship into ``staging/export-crate/``, runs the
+validation/privacy gate over the staged copy, and only then writes the final
+summary, optionally signs the manifest, and zips the result. The gate fails
+closed: a failed public export ships nothing and records a ``run.export.blocked``
+event for the audit trail.
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,6 +15,7 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
+from .constants import DETERMINISTIC_ZIP_EPOCH
 from .journal import EventWriter
 from .materialize.builder import checkpoint
 from .state import load_state
@@ -21,6 +31,15 @@ def finalize(
     out: Path | None = None,
     sign_fn: Callable[[], int] | None = None,
 ) -> int:
+    """Checkpoint if needed, stage the crate, run the privacy gate, then export.
+
+    Re-runs a checkpoint when the crate is stale, copies it into the staging
+    directory (optionally embedding the event journal), and validates the staged
+    copy with ``public=`` controlling the L5 gate. On a failed gate nothing
+    ships and ``run.export.blocked`` is recorded; otherwise the summary is
+    written, the manifest is optionally signed, and the crate is optionally
+    zipped. Returns 0 on success, non-zero when the gate or signing fails.
+    """
     state = load_state(state_dir)
     if state.dirty or not state.last_checkpoint:
         checkpoint(
@@ -45,8 +64,8 @@ def finalize(
     report = validate_run(state_dir, strict=False, public=public, crate_dir=staging)
     if report.status == "failed":
         shutil.rmtree(staging, ignore_errors=True)
-        # Record the blocked attempt for the audit trail (SPEC §13.4); the gate fails
-        # closed, so nothing is shipped.
+        # Record a run.export.blocked event so the failed public-export attempt is
+        # auditable; the gate fails closed and nothing ships.
         EventWriter(state_dir).append(
             "run.export.blocked",
             {
@@ -115,7 +134,8 @@ def export_zip(crate_dir: Path, out_path: Path, include_event_journal: bool = Fa
                 if not include_event_journal and rel.endswith("events.ndjson"):
                     continue
                 info = zipfile.ZipInfo(rel)
-                info.date_time = (2026, 6, 17, 0, 0, 0)
+                # Fixed timestamp so identical crates produce byte-identical zips.
+                info.date_time = DETERMINISTIC_ZIP_EPOCH
                 info.external_attr = 0o644 << 16
                 archive.writestr(info, path.read_bytes())
     return out_path

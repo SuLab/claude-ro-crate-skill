@@ -1,12 +1,17 @@
+"""Validation level 2 (RO-Crate structure): real JSON-LD expansion plus the
+base RO-Crate 1.2 MUSTs — descriptor/root shape, no anonymous nodes, hasPart
+reachability, referenced-file presence, and recorded-hash integrity."""
+
 from __future__ import annotations
 
 from typing import Any
 
-from ro_crate_run.constants import PROFILE_URIS, RO_CRATE_SPEC_URI
+from ro_crate_run.constants import PROFILE_URIS, RO_CRATE_SPEC_URI, is_web_id
 from ro_crate_run.files import sha256_file
 from ro_crate_run.models import ValidationFinding
 
 from .context import ValidationContext
+from .graphview import types_of
 from .jsonld import expand_metadata
 
 _ROOT_REQUIRED_ALWAYS = ("name", "description", "license")
@@ -51,18 +56,11 @@ def _contains_null(value: Any) -> bool:
     return False
 
 
-def _is_action_type(value: Any) -> bool:
-    values = value if isinstance(value, list) else [value]
-    return any(str(item).endswith("Action") for item in values)
-
-
 def _deleted_file_ids(graph: list[dict[str, Any]]) -> set[str]:
     """@ids of files removed by a recorded DeleteAction — legitimately absent on disk."""
     ids: set[str] = set()
     for entity in graph:
-        types = entity.get("@type", [])
-        types = types if isinstance(types, list) else [types]
-        if "DeleteAction" not in types:
+        if "DeleteAction" not in types_of(entity):
             continue
         for key in ("object", "result"):
             refs = entity.get(key, [])
@@ -145,14 +143,13 @@ def _is_local_data_entity(entity: dict[str, Any]) -> bool:
     metadata descriptor, and the root itself are excluded — the hasPart MUST applies
     to packaged relative-path data entities.
     """
-    types = entity.get("@type", [])
-    types = types if isinstance(types, list) else [types]
+    types = types_of(entity)
     if "File" not in types and "Dataset" not in types:
         return False
     eid = str(entity.get("@id", ""))
     if eid in ("", "./", "ro-crate-metadata.json"):
         return False
-    if eid.startswith(("http://", "https://", "urn:", "file:", "#")):
+    if is_web_id(eid) or eid.startswith("#"):
         return False
     return True
 
@@ -173,7 +170,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
     elif triples == 0:
         findings.append(ValidationFinding("ro_crate", "jsonld_empty", "JSON-LD expanded to zero triples"))
 
-    entities = {e.get("@id"): e for e in metadata.get("@graph", [])}
+    entities = ctx.entities
     descriptor = entities.get("ro-crate-metadata.json")
     root = entities.get("./")
 
@@ -204,9 +201,6 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
     if _contains_null(metadata):
         findings.append(ValidationFinding("ro_crate", "json_null_present", "Metadata contains JSON null"))
 
-    if ctx.strict and not [e for e in entities.values() if _is_action_type(e.get("@type"))]:
-        findings.append(ValidationFinding("profile", "no_actions", "Strict Process Run Crate requires an action"))
-
     crate_dir = ctx.state_dir / "ro-crate"
     project_root = ctx.state_dir.parent
     # Files legitimately absent on disk: removed by a recorded DeleteAction, or declared
@@ -221,11 +215,10 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
     exempt_ids = _deleted_file_ids(metadata.get("@graph", [])) | absent_ids
     for entity in metadata.get("@graph", []):
         eid = str(entity.get("@id", ""))
-        types = entity.get("@type", [])
-        types = types if isinstance(types, list) else [types]
+        types = types_of(entity)
         if "File" not in types and "Dataset" not in types:
             continue
-        if eid.startswith(("http://", "https://", "urn:", "file:", "#", "./")) or eid == "ro-crate-metadata.json":
+        if is_web_id(eid) or eid.startswith(("#", "./")) or eid == "ro-crate-metadata.json":
             continue
         if entity.get("contentUrl") or entity.get("external"):
             continue

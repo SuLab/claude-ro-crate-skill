@@ -1,10 +1,12 @@
+"""Profile selection (process/workflow/provenance) and synthesis of the agent-as-workflow."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ro_crate_run.constants import PROFILE_URIS
+from ro_crate_run.constants import PROFILE_URIS, WORKFLOW_LIKE_PROFILES
 from ro_crate_run.models import RunModel
 
 
@@ -31,7 +33,7 @@ def select_profile(run_model: RunModel, requested: str = "auto") -> ProfileSelec
     )
     if agent_actions:
         evidence.append({"kind": "agent_actions", "count": agent_actions})
-    if requested in {"process", "workflow", "provenance"}:
+    if requested in PROFILE_URIS:
         return ProfileSelection(requested, PROFILE_URIS[requested], "high", evidence)
     # The actions taken by the Claude Code agent ARE the workflow (SPEC §16): promotion
     # is driven by how structured that work is, independent of any external workflow-system
@@ -68,7 +70,7 @@ def synthesize_workflow(model: RunModel) -> None:
     without requiring a workflow-system file. An external definition, when present,
     is used as-is (optional enrichment) and is never overwritten here.
     """
-    if model.selected_profile not in {"workflow", "provenance"}:
+    if model.selected_profile not in WORKFLOW_LIKE_PROFILES:
         return
     if model.workflow:
         return
@@ -80,23 +82,43 @@ def synthesize_workflow(model: RunModel) -> None:
     }
 
 
+def apply_selection(model: RunModel, requested: str | None = None) -> ProfileSelection:
+    """Run profile selection and record its result on the model.
+
+    Writes ``selected_profile``/``profile_uri``/``profile_confidence`` and the
+    stringified ``profile_evidence`` so downstream consumers read the decision
+    rather than recomputing it. Returns the selection for callers that need it.
+    """
+    selection = select_profile(model, requested or model.requested_profile)
+    model.selected_profile = selection.profile
+    model.profile_uri = selection.profile_uri
+    model.profile_confidence = selection.confidence
+    model.profile_evidence = [str(item) for item in selection.evidence]
+    return selection
+
+
 def enrich_with_adapter(model: RunModel, project_dir: Path) -> None:
     """Use workflow adapters to confirm engine and discover steps from the
     workflow definition, so Provenance promotion has step evidence even when
-    no explicit ``rcr step`` events were recorded."""
-    if not model.workflow:
-        return
-    raw = str(model.workflow.get("path", ""))
-    wf_path = Path(raw)
-    if not wf_path.is_absolute():
-        wf_path = project_dir / wf_path
-    if not wf_path.exists():
-        return
-    from ro_crate_run import adapters
+    no explicit ``rcr step`` events were recorded.
 
-    detected = adapters.detect_engine(wf_path)
-    if detected is None:
-        return
-    model.workflow["engine"] = str(detected["engine"])
-    for step_id in adapters.extract_steps(wf_path):
-        model.steps.setdefault(step_id, {"step_id": step_id, "status": "identified"})
+    Adapter-discovered steps mutate ``model.steps``, so profile selection is
+    re-run afterwards and recorded on the model: the recorded decision reflects
+    the post-enrichment step evidence.
+    """
+    if model.workflow:
+        raw = str(model.workflow.get("path", ""))
+        wf_path = Path(raw)
+        if not wf_path.is_absolute():
+            wf_path = project_dir / wf_path
+        if wf_path.exists():
+            from ro_crate_run import adapters
+
+            detected = adapters.detect_engine(wf_path)
+            if detected is not None:
+                model.workflow["engine"] = str(detected["engine"])
+                for step_id in adapters.extract_steps(wf_path):
+                    model.steps.setdefault(
+                        step_id, {"step_id": step_id, "status": "identified"}
+                    )
+    apply_selection(model)

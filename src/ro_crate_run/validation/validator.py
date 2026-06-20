@@ -1,13 +1,18 @@
+"""Layered validation entry point: composes one checker per level (L0 journal
+through L5 privacy, plus optional SHACL) into a single ValidationReport and
+persists it."""
+
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from ro_crate_run.journal import EventWriter
 from ro_crate_run.models import ValidationFinding, ValidationReport
 
-from .context import build_context
+from .context import ValidationContext, build_context
 from .journal import check_journal
 from .privacy import check_privacy
 from .profiles import check_profile
@@ -16,13 +21,27 @@ from .rocrate import check_rocrate
 from .shacl import check_shacl
 from .state import check_state
 
-_LEVELS = ("journal", "state", "ro_crate", "profile", "reproducibility", "privacy")
+# Ordered pipeline of (level-name, checker). The name labels the level a checker
+# primarily emits under; SHACL is filed with the ro_crate level, so its findings
+# collapse into that level rather than introducing a separate one.
+CHECKS: tuple[tuple[str, Callable[[ValidationContext], list[ValidationFinding]]], ...] = (
+    ("journal", check_journal),
+    ("state", check_state),
+    ("ro_crate", check_rocrate),
+    ("profile", check_profile),
+    ("reproducibility", check_reproducibility),
+    ("ro_crate", check_shacl),
+    ("privacy", check_privacy),
+)
 
+# De-duplicated ordered level names reported in the levels summary.
+_LEVELS = tuple(dict.fromkeys(name for name, _ in CHECKS))
+
+# Keyed by the base finding code; a trailing _required is stripped before lookup,
+# so the policy-required variant of each warning reuses the same recommendation.
 _RECOMMENDATIONS = {
     "missing_software_versions": "Record tool versions with `rcr software <command>`.",
-    "missing_software_versions_required": "Record tool versions with `rcr software <command>`.",
     "missing_git_commit": "Commit your work so the crate references a Git commit.",
-    "missing_git_commit_required": "Commit your work so the crate references a Git commit.",
     "dirty_tree_no_diff": "Commit changes or enable git-diff capture for a clean provenance record.",
     "missing_input_hash": "Re-declare local inputs so they are hashed.",
     "no_declared_outputs": "Declare run outputs with `rcr output <path>`.",
@@ -42,6 +61,13 @@ def validate_run(
     append_event: bool = True,
     crate_dir: Path | None = None,
 ) -> ValidationReport:
+    """Run every validation level in order and return a single ValidationReport.
+
+    Composes the L0-journal through L5-privacy checkers (plus optional SHACL),
+    classifies each finding as an error or warning, writes the report to
+    ro-crate/validation-report.json, and (unless append_event is False) records
+    the validation outcome on the journal.
+    """
     ctx = build_context(state_dir, strict=strict, public=public, crate_dir=crate_dir)
     if append_event:
         EventWriter(state_dir).append(
@@ -50,13 +76,8 @@ def validate_run(
         )
 
     findings: list[ValidationFinding] = []
-    findings += check_journal(ctx)
-    findings += check_state(ctx)
-    findings += check_rocrate(ctx)
-    findings += check_profile(ctx)
-    findings += check_reproducibility(ctx)
-    findings += check_shacl(ctx)
-    findings += check_privacy(ctx)
+    for _name, check in CHECKS:
+        findings += check(ctx)
 
     errors = [f for f in findings if _is_error(f)]
     warnings = [f for f in findings if f not in errors]
@@ -69,7 +90,13 @@ def validate_run(
         levels[finding.level] = "failed"
 
     status = "failed" if errors else "warning" if warnings else "passed"
-    recommendations = sorted({_RECOMMENDATIONS[f.code] for f in findings if f.code in _RECOMMENDATIONS})
+    recommendations = sorted(
+        {
+            _RECOMMENDATIONS[k]
+            for f in findings
+            if (k := f.code.removesuffix("_required")) in _RECOMMENDATIONS
+        }
+    )
     report = ValidationReport(
         status, ctx.state.selected_profile, ctx.state.profile_uri, levels, errors, warnings, recommendations
     )
@@ -89,16 +116,18 @@ def validate_run(
 _PROFILE_WARNING_CODES = {
     "open_phase",
     "open_step",
-    # L3 Workflow checks: structural quality findings, not hard errors in non-strict mode.
+    # Workflow structural-quality findings: downgraded to warnings outside strict mode.
     "workflow_no_action_uses_instrument",
     "workflow_missing_formal_parameters",
     "parameter_value_missing_exampleOfWork",
-    # D5: no-action warning (non-strict process crate)
+    # A process crate with no recorded actions is a warning, not an error, in non-strict mode.
     "no_actions",
 }
 
 
 def _is_error(finding: ValidationFinding) -> bool:
+    """Single authority for finding severity: True classifies the finding as an
+    error, False as a warning."""
     # Privacy findings are always errors.
     if finding.level == "privacy":
         return True

@@ -1,3 +1,6 @@
+"""Checkpoint orchestration and pure projection of a RunModel into an RO-Crate 1.2
+directory by composing mapping builders."""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,33 +17,36 @@ from rocrate.rocrate import ROCrate  # type: ignore[import-untyped]
 from ro_crate_run import __version__ as _rcr_version
 from ro_crate_run.constants import (
     DEFAULT_LICENSE,
+    PROFILE_URIS,
     RO_CRATE_CONTEXT,
     RO_CRATE_SPEC_URI,
+    WORKFLOW_LIKE_PROFILES,
+    WORKFLOW_RO_CRATE_URI,
     WORKFLOW_RUN_CONTEXT,
+    is_web_id,
 )
-from ro_crate_run.ids import IdMap
+from ro_crate_run.ids import IdMap, relative_file_id
 from ro_crate_run.journal import EventWriter
 from ro_crate_run.models import LastCheckpoint, RunModel, strip_none
 from ro_crate_run.state import load_config, load_state, read_events, write_state
 from ro_crate_run.time import utc_now
 from ro_crate_run.validation.validator import validate_run
 
-from .files import log_should_copy, plan_file_inclusion
+from .files import FilePlan, log_should_copy, plan_file_inclusion
 from .run_model import build_run_model
-
-# L3: the additional profile permalinks a workflow/provenance crate's root SHOULD also
-# declare (WfRC 0.5 is a superset of Process Run Crate 0.5 + Workflow RO-Crate 1.0).
-PROCESS_PROFILE_URI = "https://w3id.org/ro/wfrun/process/0.5"
-WORKFLOW_RO_CRATE_URI = "https://w3id.org/workflowhub/workflow-ro-crate/1.0"
 
 
 def checkpoint(state_dir: Path, requested_profile: str = "auto", *, lock_timeout: float = 30.0) -> int:
+    """Acquire the dedicated checkpoint.lock (NOT the append lock) and run the
+    build/validate cycle: emit crate.checkpoint.started, build the RunModel, write +
+    validate the crate, and clear dirty only on a non-failed crate.checkpoint.completed;
+    returns the checkpoint sequence."""
     with FileLock(str(Path(state_dir) / "checkpoint.lock"), timeout=lock_timeout):
         return _checkpoint_locked(state_dir, requested_profile)
 
 
 def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
-    from .profiles import enrich_with_adapter, select_profile
+    from .profiles import enrich_with_adapter
 
     # If an explicit profile is requested, persist it to state first so
     # build_run_model (which reads state.requested_profile) honours it.
@@ -54,15 +60,16 @@ def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
     enrich_with_adapter(preview, Path(state_dir).parent)
     _record_profile_selection(state_dir, preview, requested_profile)
     state = load_state(state_dir)
-    # A3/C6: mark dirty if the materializer version changed since last checkpoint.
-    if state.last_checkpoint and state.last_checkpoint.materializer_version not in {None, _rcr_version}:
-        state.dirty = True
-        write_state(state_dir, state)
-    # A3/C6: mark dirty if the profile selection changed since last checkpoint.
-    if (
+    # Mark dirty if the materializer version changed since the last checkpoint.
+    version_changed = bool(
         state.last_checkpoint
-        and state.selected_profile != preview.selected_profile
-    ):
+        and state.last_checkpoint.materializer_version not in {None, _rcr_version}
+    )
+    # Mark dirty if the profile selection changed since the last checkpoint.
+    profile_changed = bool(
+        state.last_checkpoint and state.selected_profile != preview.selected_profile
+    )
+    if version_changed or profile_changed:
         state.dirty = True
         write_state(state_dir, state)
     high_water = state.sequence
@@ -73,8 +80,8 @@ def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
         source_kind="materializer",
     )
     try:
-        # C1 (§14.2): validate journal syntax + hash chain BEFORE building the model,
-        # so a tampered/corrupt journal is caught before it is processed or written.
+        # Validate journal syntax + hash chain BEFORE building the model, so a
+        # tampered/corrupt journal is caught before it is processed or written.
         from ro_crate_run.validation.context import build_context
         from ro_crate_run.validation.journal import check_journal
 
@@ -87,11 +94,10 @@ def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
         model = build_run_model(state_dir, high_water)
         enrich_with_adapter(model, Path(state_dir).parent)
         write_crate(state_dir, model, published_at=utc_now())
-        sel = select_profile(model, requested_profile)
         state = load_state(state_dir)
         state.selected_profile = model.selected_profile
         state.profile_uri = model.profile_uri
-        state.profile_confidence = sel.confidence
+        state.profile_confidence = model.profile_confidence or state.profile_confidence
         write_state(state_dir, state)
         report = validate_run(state_dir, strict=False, public=False, append_event=False)
         complete = writer.append(
@@ -121,6 +127,13 @@ def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
 
 
 def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str] = None) -> None:
+    """Project a RunModel into an RO-Crate 1.2 directory under <state_dir>/ro-crate.
+
+    Composes the mapping builders into a flattened @graph (descriptor, root, profiles,
+    actors, software, provenance context, files, workflow, steps, command actions, agent
+    actions, notes/decisions), copies any captured file bodies into the crate, links every
+    data entity from the root via hasPart, and writes ro-crate-metadata.json + run-summary.json.
+    """
     from ro_crate_run.materialize import mapping
 
     published_at = published_at or utc_now()
@@ -186,9 +199,9 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     # L3 (WfRC 0.5 SHOULD): a workflow/provenance crate's root conformsTo SHOULD also declare
     # the Process Run Crate 0.5 + Workflow RO-Crate 1.0 profiles, and EACH listed profile MUST
     # link to a contextual Profile entity (RO-Crate 1.2 MUST).
-    if model.selected_profile in {"workflow", "provenance"}:
+    if model.selected_profile in WORKFLOW_LIKE_PROFILES:
         extra_profiles = {
-            PROCESS_PROFILE_URI: "Process Run Crate",
+            PROFILE_URIS["process"]: "Process Run Crate",
             WORKFLOW_RO_CRATE_URI: "Workflow RO-Crate",
         }
         for uri, label in extra_profiles.items():
@@ -221,15 +234,15 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         root["mentions"].append({"@id": ctx_entity["@id"]})
     # Copy provenance-context File artifacts (git-diff patch, dependency manifests) that rcr
     # discovered/created into the crate so their relative @ids correspond to present files
-    # (RO-Crate 1.2 §4) and the crate re-loads via ro-crate-py.  The final H2 pass then links
-    # the now-present files from hasPart.
+    # (RO-Crate 1.2 §4) and the crate re-loads via ro-crate-py.  The final hasPart pass below
+    # links the now-present files.
     for ctx_entity in context_entities:
         cid = ctx_entity.get("@id")
         types = ctx_entity.get("@type")
         type_list = types if isinstance(types, list) else [types]
         if not isinstance(cid, str) or "File" not in {str(t) for t in type_list}:
             continue
-        if cid.startswith(("#", "http://", "https://", "urn:", "file:")):
+        if cid.startswith("#") or is_web_id(cid):
             continue
         if not (crate_dir / cid).exists():
             _copy_into_crate(project_dir / cid, crate_dir / cid)
@@ -307,7 +320,7 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
                 _copy_into_crate(project_dir / rel, crate_dir / rel)
         # Ensure command outputs appear as file entities even when not in plans
         for output in command.outputs:
-            output_id = _file_id(output, project_dir)
+            output_id = relative_file_id(Path(output), project_dir)
             if output_id not in file_ids:
                 output_plan = plans.get(output_id)
                 if output_plan is not None:
@@ -319,15 +332,7 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
                         _copy_into_crate(output_plan.abs_path, crate_dir / output_id)
                 else:
                     # Fallback: emit a minimal File entity for undeclared outputs.
-                    from dataclasses import dataclass as _dataclass
-
-                    @_dataclass
-                    class _FallbackPlan:
-                        file_id: str
-                        abs_path: Path
-                        declared: dict  # type: ignore[type-arg]
-
-                    fallback = _FallbackPlan(
+                    fallback = FilePlan(
                         file_id=output_id,
                         abs_path=project_dir / output,
                         declared={"path": output, "description": "Command output"},
@@ -338,22 +343,12 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         # Ensure command inputs referenced as the action's `object` have File entities
         # even when not separately declared via `rcr input` (otherwise the object ref
         # would dangle). Inputs are not forced into hasPart — they are referenced only.
-        from dataclasses import dataclass as _dataclass
         for input_path in command.inputs:
-            input_id = _file_id(input_path, project_dir)
-            if input_id in file_ids or input_id.startswith(
-                ("http://", "https://", "urn:", "file:", "#")
-            ):
+            input_id = relative_file_id(Path(input_path), project_dir)
+            if input_id in file_ids or input_id.startswith("#") or is_web_id(input_id):
                 file_ids.add(input_id)
                 continue
-
-            @_dataclass
-            class _InputPlan:
-                file_id: str
-                abs_path: Path
-                declared: dict  # type: ignore[type-arg]
-
-            input_plan = _InputPlan(
+            input_plan = FilePlan(
                 file_id=input_id,
                 abs_path=project_dir / input_path,
                 declared={"path": input_path, "description": "Command input"},
@@ -409,9 +404,8 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
                 "encodingFormat": "application/x-ndjson",
                 "about": {"@id": "./"},
             }
-            # L8 (RO-Crate 1.2 SHOULD): File entities SHOULD carry contentSize (bytes).
-            # A captured local File (one with contentSize) MUST also carry dateModified so a
-            # consumer can describe the embedded body (matches the §15.6 core-metadata contract).
+            # File entities SHOULD carry contentSize (bytes); a captured local File MUST also
+            # carry dateModified so a consumer can describe the embedded body (RO-Crate 1.2).
             try:
                 journal_entity["contentSize"] = str(journal_src.stat().st_size)
             except OSError:
@@ -420,16 +414,16 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
             graph.append(journal_entity)
             root["hasPart"].append({"@id": journal_rel})
 
-    # --- Human decisions (L6: materialize AskUserQuestion / plan approvals) ---
+    # --- Human decisions: materialize AskUserQuestion / plan approvals ---
     decision_entities = _build_tool_decisions(model)
     graph.extend(decision_entities)
     root["mentions"].extend({"@id": e["@id"]} for e in decision_entities)
 
-    # --- README.md (L3: WfRC SHOULD; harmless for process crates too) ---
+    # --- README.md (WfRC SHOULD; harmless for process crates too) ---
     # Only GENERATE one when the run did not already produce/declare a README.md: writing a
     # generated README over a captured project README would corrupt that File's recorded
     # sha256 (an @id collision -> file_content_mismatch). An existing README.md already
-    # satisfies the SHOULD; the H2 pass below ensures it is in hasPart.
+    # satisfies the SHOULD; the hasPart pass below ensures it is linked.
     readme_rel = "README.md"
     if readme_rel not in {e.get("@id") for e in graph}:
         _write_readme(crate_dir / readme_rel, model)
@@ -449,12 +443,11 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         graph.append(readme_entity)
         root["hasPart"].append({"@id": readme_rel})
 
-    # --- H2 (RO-Crate 1.2 MUST): every File/Dataset data entity reachable from root hasPart.
-    # Data entities are linked, directly or indirectly, from the Root via hasPart.  After the
-    # whole graph is assembled, ensure every present-file data entity (sidecars, stdout/stderr
-    # logs, git-diff patch, dependency manifests, declared inputs/outputs) appears in hasPart —
-    # contextual (#-prefixed) entities, absolute-URI (web/by-reference) entities, and the
-    # metadata descriptor are excluded.
+    # --- Every File/Dataset data entity reachable from root hasPart (RO-Crate 1.2 MUST) ---
+    # After the whole graph is assembled, ensure every present-file data entity (sidecars,
+    # stdout/stderr logs, git-diff patch, dependency manifests, declared inputs/outputs)
+    # appears in hasPart — contextual (#-prefixed) entities, absolute-URI (web/by-reference)
+    # entities, and the metadata descriptor are excluded.
     _ensure_data_entities_in_haspart(graph, root)
 
     # --- Write ---
@@ -477,14 +470,14 @@ def _copy_into_crate(src: Path, dst: Path) -> None:
 
 
 def _ensure_data_entities_in_haspart(graph: list[dict[str, Any]], root: dict[str, Any]) -> None:
-    """H2 (RO-Crate 1.2 MUST): link every File/Dataset data entity to the root via hasPart.
+    """Link every File/Dataset data entity to the root via hasPart (RO-Crate 1.2 MUST).
 
     A "data entity" is one whose @type includes File or Dataset and whose @id is a relative
     path (not `#`-prefixed → contextual; not an absolute URI → web/by-reference, linked via
     mentions) and not the metadata descriptor / crate root.  ro-crate-py's reader treats every
     relative-@id File/Dataset as a data entity and raises on read unless it is linked from
-    hasPart, so this link is also what makes the emitted crate re-load via ro-crate-py (the H1
-    round-trip gate).  Existing hasPart entries and any `mentions` links are preserved."""
+    hasPart, so this link is also what makes the emitted crate re-load via ro-crate-py.
+    Existing hasPart entries and any `mentions` links are preserved."""
     has_part = root.setdefault("hasPart", [])
     present = {ref.get("@id") for ref in has_part if isinstance(ref, dict)}
     for entity in graph:
@@ -495,7 +488,7 @@ def _ensure_data_entities_in_haspart(graph: list[dict[str, Any]], root: dict[str
             continue
         if entity_id.startswith("#") or entity_id in {"./", "ro-crate-metadata.json"}:
             continue
-        if entity_id.startswith(("http://", "https://", "urn:", "file:")):
+        if is_web_id(entity_id):
             continue
         types = entity.get("@type")
         type_list = types if isinstance(types, list) else [types]
@@ -527,10 +520,12 @@ def _write_readme(path: Path, model: RunModel) -> None:
 
 
 def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
-    """L6: materialize captured human decisions (AskUserQuestion answers, approved plans).
+    """Materialize captured human decisions (AskUserQuestion answers, approved plans).
 
-    Reads `getattr(model, "tool_decisions", [])` defensively so the builder works before and
-    after Agent C adds the field.  Each decision is attributed to the HUMAN (`#actor/human`)."""
+    Reads model.tool_decisions defensively (absent on older models), attributing each
+    decision to the human actor.  Ids use the ``#tool-decision/<sequence>`` namespace, which
+    is disjoint from the ``#decision/<index>`` ids minted by build_notes_decisions, so the
+    two decision families never collide when merged into the same graph."""
     decisions = getattr(model, "tool_decisions", []) or []
     entities: list[dict[str, Any]] = []
     for decision in decisions:
@@ -541,7 +536,7 @@ def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
             continue
         timestamp = decision.get("timestamp")
         tool = str(decision.get("tool") or "")
-        decision_id = f"#decision/{seq}"
+        decision_id = f"#tool-decision/{seq}"
         if tool == "AskUserQuestion":
             question = decision.get("question")
             options = decision.get("options") or []
@@ -573,16 +568,6 @@ def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
                 }
             )
     return entities
-
-
-def _file_id(path: str, project_dir: Path) -> str:
-    p = Path(path)
-    if p.is_absolute():
-        try:
-            return str(p.resolve().relative_to(project_dir.resolve()))
-        except ValueError:
-            return p.as_uri()
-    return str(p)
 
 
 def _dedupe(graph: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -674,7 +659,7 @@ def _write_metadata_with_rocrate(crate_dir: Path, data: dict[str, Any]) -> None:
     embedded_entities: dict[str, dict[str, Any]] = {}
     for entity in data["@graph"]:
         crate.add_or_update_jsonld(_rocrate_compatible(dict(entity), embedded_entities))
-    # H1: every nested typed dict that lacked an @id has been replaced by a reference
+    # Every nested typed dict that lacked an @id has been replaced by a reference
     # ({"@id": "#embedded/<digest>"}) in its parent, and its FULL entity stored here as a
     # top-level node.  ro-crate-py therefore serializes a reference (not an anonymous inline
     # copy stripped of @id), so the emitted crate re-loads via rocrate.ROCrate() and contains

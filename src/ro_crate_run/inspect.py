@@ -1,3 +1,6 @@
+"""Read-only inspection helpers: summarise the event journal or the emitted
+crate, and render a Mermaid graph of the crate's actions and their data flow."""
+
 from __future__ import annotations
 
 import json

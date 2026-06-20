@@ -1,7 +1,12 @@
+"""Galaxy adapter: detect a ``.ga`` workflow export and list its step names."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+engine_name = "galaxy"
+homepage = "https://galaxyproject.org/"
 
 
 def identify(path: Path) -> dict[str, object] | None:

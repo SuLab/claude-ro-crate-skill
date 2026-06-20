@@ -1,3 +1,7 @@
+"""Validation level 0 (journal integrity): hash-chain linkage, monotonic
+sequence, required fields, ISO-8601 timestamps, the registered event-type
+vocabulary, and command start/terminal pairing for the append-only journal."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

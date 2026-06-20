@@ -1,3 +1,6 @@
+"""Render a static HTML preview of the current run by projecting the event log
+into a RunModel and substituting it into the bundled preview template."""
+
 from __future__ import annotations
 
 import html
@@ -31,13 +34,4 @@ def render(state_dir: Path) -> str:
         run_id=html.escape(model.run_id),
         command_rows=command_rows,
         output_items=output_items,
-    )
-
-
-def render_preview_html(summary: dict[str, object]) -> str:
-    """Backwards-compatible shim for callers passing a summary dict."""
-    title = html.escape(str(summary.get("title", "RO-Crate Run")))
-    return (
-        f"<!doctype html><html><head><title>{title}</title></head>"
-        f"<body><h1>RO-Crate Run Preview</h1><h2>{title}</h2></body></html>"
     )

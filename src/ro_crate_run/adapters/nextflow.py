@@ -1,7 +1,12 @@
+"""Nextflow adapter: detect ``.nf`` / ``nextflow.config`` and list its processes."""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+engine_name = "nextflow"
+homepage = "https://www.nextflow.io/"
 
 
 def identify(path: Path) -> dict[str, object] | None:

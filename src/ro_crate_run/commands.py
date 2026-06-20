@@ -1,3 +1,7 @@
+"""Command handlers behind the ``rcr`` CLI: start/resume runs, declare
+inputs/outputs/parameters/software, run captured commands, checkpoint, validate,
+finalize, sign/verify, redact, install the project, and import an RO-Crate."""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +16,7 @@ from typing import Any, cast
 
 from . import __version__
 from .config import default_config
+from .constants import CONTAINER_MANIFESTS, DEPENDENCY_MANIFESTS
 from .context import ProjectContext
 from .export import finalize
 from .files import sha256_file
@@ -43,21 +48,6 @@ from .state import (
     write_state,
 )
 from .validation.validator import validate_run
-
-LOCKFILE_NAMES = (
-    "requirements.txt",
-    "pyproject.toml",
-    "poetry.lock",
-    "uv.lock",
-    "environment.yml",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "renv.lock",
-    "Snakefile",
-    "nextflow.config",
-    "Dockerfile",
-    "Containerfile",
-)
 
 
 def _bootstrap_run(
@@ -93,7 +83,7 @@ def _bootstrap_run(
             + "\n"
         )
     writer = EventWriter(state_dir)
-    # A4 (§9.3): record Claude Code session metadata (present-only; no JSON null).
+    # Record Claude Code session metadata (present-only; absent keys are omitted, not null).
     claude_meta: dict[str, str] = {}
     for env_key, field_name in (
         ("CLAUDE_SESSION_ID", "session_id"),
@@ -164,11 +154,15 @@ def _archive_closed_run(state_dir: Path) -> str:
 
 
 def start(title: str, mode: str, profile: str, no_checkpoint: bool = False) -> int:
+    """Begin a run: bootstrap state + emit run.started, or reconcile an existing run.
+
+    An active run is left untouched (idempotent); a closed run is archived first.
+    """
     ctx = ProjectContext.from_cwd()
-    # SPEC §9.3: state.json / events.ndjson are created "if absent". A second `rcr start`
-    # MUST NOT clobber an existing run's state with a fresh initial_state — that orphans the
-    # journal (new run_id + reset sequence) and breaks the hash chain (non-monotonic
-    # sequence, previous-hash mismatch). Two cases when state.json already exists:
+    # A second `rcr start` MUST NOT clobber an existing run's state with a fresh
+    # initial_state — that orphans the journal (new run_id + reset sequence) and breaks the
+    # hash chain (non-monotonic sequence, previous-hash mismatch). Two cases when state.json
+    # already exists:
     if (ctx.state_dir / "state.json").exists():
         if is_active_run(read_events(ctx.state_dir)):
             # (a) Run still active: idempotent. Reconcile from the authoritative journal and
@@ -203,7 +197,7 @@ def auto_start_run(env: dict[str, str] | None = None) -> bool:
     """Bootstrap a run from a hook when none exists yet (opt-in via RCR_AUTO_START).
 
     Returns True if a run was created. Lets the agent's actions be captured as the
-    workflow from session start even when no human ran `rcr start` (SPEC §16).
+    workflow from session start even when no human ran `rcr start`.
     """
     ctx = ProjectContext.from_cwd(env=env)
     if (ctx.state_dir / "state.json").exists():
@@ -229,7 +223,7 @@ def status(json_output: bool = False) -> int:
     from .recovery import ensure_recovered
 
     ensure_recovered(ctx.state_dir)
-    # §12.2: surface side-effect dirtiness (materializer version / output-hash change).
+    # Surface side-effect dirtiness (materializer version / output-hash change).
     _refresh_run_dirty(ctx.state_dir)
     _print_status(ctx.state_dir, json_output=json_output)
     return 0
@@ -299,9 +293,7 @@ def _print_status(state_dir: Path, *, json_output: bool = False) -> None:
 
 def note(text: str, public: bool = False) -> int:
     ctx = ProjectContext.from_cwd()
-    result = Redactor.from_config(load_config(ctx.state_dir), state_dir=ctx.state_dir).redact_text(
-        text
-    )
+    result = Redactor.for_state_dir(ctx.state_dir).redact_text(text)
     writer = EventWriter(ctx.state_dir)
     writer.append(
         "human.note",
@@ -322,15 +314,15 @@ def note(text: str, public: bool = False) -> int:
 
 def decision(text: str, rationale: str | None = None, public: bool = False) -> int:
     ctx = ProjectContext.from_cwd()
-    redactor = Redactor.from_config(load_config(ctx.state_dir), state_dir=ctx.state_dir)
+    redactor = Redactor.for_state_dir(ctx.state_dir)
     text_result = redactor.redact_text(text)
     payload: dict[str, Any] = {"text": text_result.text}
-    rationale_result_applied = 0
+    results = [text_result]
     if rationale:
         rationale_result = redactor.redact_text(rationale)
         payload["rationale"] = rationale_result.text
-        rationale_result_applied = rationale_result.applied
-    redacted_flag = text_result.applied > 0 or rationale_result_applied > 0
+        results.append(rationale_result)
+    redacted_flag = any(result.applied for result in results)
     writer = EventWriter(ctx.state_dir)
     writer.append(
         "human.decision",
@@ -342,11 +334,7 @@ def decision(text: str, rationale: str | None = None, public: bool = False) -> i
     if redacted_flag:
         writer.append(
             "redaction.applied",
-            {
-                "context": "human.decision",
-                "applied": text_result.applied + rationale_result_applied,
-                "categories": [],
-            },
+            redaction_event_payload("human.decision", *results),
             source_kind="human_cli",
             redacted=True,
         )
@@ -371,7 +359,7 @@ def declare_io(
         "required": required,
         "copy_policy": "copy" if copy else "reference",
     }
-    # E5: hash local input files (sha256 + size) so missing_input_hash warning is suppressible.
+    # Hash local input files (sha256 + size) so the missing_input_hash warning is suppressible.
     if kind == "input" and existence_val.startswith("observed"):
         local_path = Path(path)
         cfg = load_config(ctx.state_dir)
@@ -411,8 +399,8 @@ def declare_io(
 
 
 def _refresh_run_dirty(state_dir: Path) -> None:
-    """Set state.dirty for side-effect §12.2 triggers not captured by events: a changed
-    materializer version since last checkpoint (A3/C6) or changed on-disk output hashes (A5)."""
+    """Set state.dirty for side-effect triggers not captured by events: a changed
+    materializer version since the last checkpoint, or changed on-disk output hashes."""
     state = load_state(state_dir)
     if state.dirty:
         return
@@ -517,11 +505,13 @@ def software(command_or_name: str, version: str | None, software_type: str | Non
 
 def _scan_lockfiles(ctx: ProjectContext) -> None:
     writer = EventWriter(ctx.state_dir)
-    # Fixed-name lockfiles
-    for name in LOCKFILE_NAMES:
+    # Dependency/environment manifests matched by exact filename (lockfiles, package
+    # manifests, workflow definitions, container files); Dockerfile/Containerfile are
+    # recorded as kind="container", the rest as kind="lockfile".
+    for name in (*DEPENDENCY_MANIFESTS, "Dockerfile", "Containerfile"):
         candidate = ctx.project_dir / name
         if candidate.exists() and candidate.is_file():
-            kind = "container" if name in {"Dockerfile", "Containerfile"} else "lockfile"
+            kind = "container" if name in CONTAINER_MANIFESTS else "lockfile"
             writer.append(
                 "dependency.lockfile.observed",
                 {
@@ -531,7 +521,7 @@ def _scan_lockfiles(ctx: ProjectContext) -> None:
                 },
                 source_kind="human_cli",
             )
-    # E9: CWL/WDL workflow files (SPEC §9.9 SHOULD — scan for *.cwl, *.wdl)
+    # CWL/WDL workflow definition files (scanned for *.cwl, *.wdl).
     for pattern, wf_kind in (("*.cwl", "cwl-workflow"), ("*.wdl", "wdl-workflow")):
         for candidate in ctx.project_dir.glob(pattern):
             if candidate.is_file():
@@ -617,6 +607,7 @@ def do_checkpoint(profile: str = "auto") -> int:
 
 
 def do_validate(strict: bool = False, json_output: bool = False, public: bool = False) -> int:
+    """Validate the current run and print the report; ``public`` runs the L5 export gate."""
     ctx = ProjectContext.from_cwd()
     report = validate_run(ctx.state_dir, strict=strict, public=public)
     if json_output:
@@ -701,6 +692,7 @@ def do_finalize(
     out: str | None = None,
     sign: bool = False,
 ) -> int:
+    """Finalize the run into a distributable crate, applying the public/private policy."""
     ctx = ProjectContext.from_cwd()
     cfg = load_config(ctx.state_dir)
     resolved = cfg.privacy.public_by_default if public is None else public
@@ -772,15 +764,22 @@ def abort(reason: str = "") -> int:
 
 def record_result(accepted: bool, text: str = "") -> int:
     ctx = ProjectContext.from_cwd()
-    result = Redactor.from_config(load_config(ctx.state_dir), state_dir=ctx.state_dir).redact_text(
-        text
-    )
-    EventWriter(ctx.state_dir).append(
-        "human.accepted_result" if accepted else "human.rejected_result",
+    result = Redactor.for_state_dir(ctx.state_dir).redact_text(text)
+    context = "human.accepted_result" if accepted else "human.rejected_result"
+    writer = EventWriter(ctx.state_dir)
+    writer.append(
+        context,
         {"text": result.text},
         source_kind="human_cli",
         redacted=result.applied > 0,
     )
+    if result.applied:
+        writer.append(
+            "redaction.applied",
+            redaction_event_payload(context, result),
+            source_kind="human_cli",
+            redacted=True,
+        )
     return 0
 
 

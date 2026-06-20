@@ -1,3 +1,7 @@
+"""Execute a user command under provenance capture: snapshot inputs/outputs,
+stream and redact stdout/stderr, write a sidecar record, and journal the
+execution.command.started / completed / failed events."""
+
 from __future__ import annotations
 
 import json
@@ -58,7 +62,7 @@ class CommandRunner:
         inputs = inputs or []
         outputs = outputs or []
         cfg = load_config(self.state_dir)
-        redactor = Redactor.from_config(cfg, state_dir=self.state_dir)
+        redactor = Redactor.for_state_dir(self.state_dir)
         argv_results = [redactor.redact_text(arg) for arg in argv]
         recorded_argv = [r.text for r in argv_results]
         argv_applied = sum(r.applied for r in argv_results)

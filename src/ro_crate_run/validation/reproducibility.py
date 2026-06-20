@@ -1,15 +1,17 @@
+"""Validation level 4 (reproducibility): non-blocking warnings about gaps that
+weaken a re-run — missing git commit, software versions, hashes, lockfiles,
+container digests, and lineage. A finding is an error only when its code ends
+in ``_required``."""
+
 from __future__ import annotations
 
 from typing import Any
 
+from ro_crate_run.constants import DEPENDENCY_MANIFESTS
 from ro_crate_run.models import ValidationFinding
 
 from .context import ValidationContext
-
-_LOCKFILES = {
-    "requirements.txt", "pyproject.toml", "poetry.lock", "uv.lock", "environment.yml",
-    "package-lock.json", "pnpm-lock.yaml", "renv.lock", "Snakefile", "nextflow.config",
-}
+from .graphview import is_action
 
 
 def _env_observed(ctx: ValidationContext) -> dict[str, Any]:
@@ -33,54 +35,52 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
         else:
             findings.append(ValidationFinding("reproducibility", code, message))
 
-    # 1. Missing git commit
+    # Missing git commit
     if not git.get("commit"):
         warn("missing_git_commit", "No Git commit recorded", required=vcfg.require_git_commit)
-    # 2. Dirty tree without diff (diff_file is the key set by _maybe_capture_git_diff)
+    # Dirty working tree but no captured diff file recorded on the git model
     if git.get("dirty") and not git.get("diff_file"):
         warn("dirty_tree_no_diff", "Working tree was dirty and no diff captured", required=vcfg.require_clean_git)
-    # 3. Missing software versions
+    # Missing software versions
     if not ctx.state.known_software:
         warn(
             "missing_software_versions",
             "No software versions declared",
             required=vcfg.require_software_versions and ctx.strict,
         )
-    # 4. Missing hashes for local inputs
+    # Missing hashes for local inputs
     for declared in ctx.state.declared_inputs:
         path = str(declared.get("path", ""))
         if declared.get("existence", "").startswith("observed") and not declared.get("sha256"):
             findings.append(ValidationFinding("reproducibility", "missing_input_hash", f"Local input not hashed: {path}", path=path))
-    # 5. Missing declared outputs
+    # Missing declared outputs
     if not ctx.state.declared_outputs:
         warn("no_declared_outputs", "No outputs declared", required=vcfg.require_declared_outputs and ctx.strict)
-    # 6. Missing environment summary
+    # Missing environment summary
     if not env.get("os") and not env.get("python"):
         findings.append(ValidationFinding("reproducibility", "missing_environment_summary", "No environment summary observed"))
-    # 7. Missing container digest for containerized run
+    # Missing container digest for containerized run
     containers = [e for e in ctx.events if e.get("event_type") == "container.observed"]
     for c in containers:
         payload = c.get("payload", {})
         if isinstance(payload, dict) and not payload.get("digest"):
             findings.append(ValidationFinding("reproducibility", "missing_container_digest", "Container observed without digest"))
-    # 8. Missing lockfiles for dependency-managed projects
+    # Missing lockfiles for dependency-managed projects
     has_lockfile_event = any(e.get("event_type") == "dependency.lockfile.observed" for e in ctx.events)
-    if not has_lockfile_event and any((project_dir / name).exists() for name in _LOCKFILES):
+    if not has_lockfile_event and any((project_dir / name).exists() for name in DEPENDENCY_MANIFESTS):
         findings.append(ValidationFinding("reproducibility", "missing_lockfiles", "Dependency lockfiles present but not recorded"))
-    # 9. Missing human rationale for manual parameter changes
+    # Missing human rationale for manual parameter changes
     param_events = [e for e in ctx.events if e.get("event_type") == "workflow.parameter.declared"]
     decision_events = [e for e in ctx.events if e.get("event_type") == "human.decision"]
     if param_events and not decision_events:
         findings.append(ValidationFinding("reproducibility", "missing_parameter_rationale", "Parameters declared without any human rationale"))
-    # 11. Declared output with no producing Action (lineage gap). An output the agent
-    #     wrote (file.* -> CreateAction) or produced via `rcr run --outputs` links here;
-    #     a separately-declared output with no producer is flagged so the gap is visible.
+    # Declared output with no producing Action (lineage gap). An output the agent
+    # wrote (file.* -> CreateAction) or produced via `rcr run --outputs` links here;
+    # a separately-declared output with no producer is flagged so the gap is visible.
     if ctx.metadata:
         produced: set[str] = set()
         for entity in ctx.metadata.get("@graph", []):
-            types = entity.get("@type", [])
-            types = types if isinstance(types, list) else [types]
-            if not any(str(t).endswith("Action") for t in types):
+            if not is_action(entity):
                 continue
             result = entity.get("result") or []
             result = result if isinstance(result, list) else [result]
@@ -98,7 +98,7 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
                     "reproducibility", "output_without_producer",
                     f"Declared output has no producing action (lineage gap): {path}", path=path,
                 ))
-    # 10. Stale crate (SPEC §18.3)
+    # Stale crate: provenance events exist after the last checkpoint.
     if ctx.state.dirty:
         warn(
             "crate_stale",

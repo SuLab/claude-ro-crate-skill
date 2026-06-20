@@ -1,25 +1,22 @@
+"""Load/persist the derived state.json cache and config.json.
+
+state.json is recoverable from the append-only event journal and is never a
+source of truth; it is a cache that the journal can always rebuild.
+"""
+
 from __future__ import annotations
 
 import json
 import secrets
+import typing
 from collections.abc import Callable
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, Union, cast, get_args, get_origin
 
-from .constants import PROFILE_URIS
-from .models import (
-    FilePolicy,
-    HashPolicy,
-    JsonDict,
-    LastCheckpoint,
-    PrivacyConfig,
-    RcrConfig,
-    RcrState,
-    RedactionConfig,
-    RemoteJournalConfig,
-    ValidationConfig,
-)
+from . import ids
+from .constants import resolve_profile
+from .models import JsonDict, RcrConfig, RcrState
 from .time import utc_now, utc_now_compact
 
 T = TypeVar("T")
@@ -36,7 +33,7 @@ def initial_state(title: str, config: RcrConfig, now: str | None = None) -> RcrS
     compact = now.replace("-", "").replace(":", "").replace("T", "_").split(".")[0].rstrip("Z")
     if len(compact) < 15:
         compact = utc_now_compact()
-    selected = "process" if config.default_profile == "auto" else config.default_profile
+    selected, profile_uri = resolve_profile(config.default_profile)
     return RcrState(
         run_id=f"run_{compact}_{suffix}",
         title=title,
@@ -45,7 +42,7 @@ def initial_state(title: str, config: RcrConfig, now: str | None = None) -> RcrS
         mode=config.mode,
         selected_profile=selected,
         requested_profile=config.default_profile,
-        profile_uri=PROFILE_URIS.get(selected, PROFILE_URIS["process"]),
+        profile_uri=profile_uri,
         privacy=config.privacy,
     )
 
@@ -83,21 +80,40 @@ def update_state(state_dir: Path, mutate: Callable[[RcrState], None]) -> RcrStat
 
 
 def write_id_map(state_dir: Path, id_map: dict[str, Any] | None = None) -> None:
-    id_map = id_map or {
-        "schema_version": "1.0.0",
-        "event_to_entity": {},
-        "path_to_entity": {},
-        "step_to_entity": {},
-        "profile_to_entity": {},
-    }
+    id_map = id_map or ids.new_id_map()
     (state_dir / "id-map.json").write_text(json.dumps(id_map, indent=2, sort_keys=True) + "\n")
 
 
 def read_events(state_dir: Path) -> list[dict[str, Any]]:
+    """Read every journal event, raising on a malformed line.
+
+    Callers that reduce or repair the journal rely on this strict behavior; use
+    :func:`read_events_safe` when a corrupted line should be reported instead.
+    """
     path = state_dir / "events.ndjson"
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def read_events_safe(state_dir: Path) -> tuple[list[dict[str, Any]], str | None]:
+    """Read journal events, capturing the first parse error instead of raising.
+
+    Returns the events parsed up to the first malformed line plus a human-readable
+    error string (or ``None`` when every line parsed cleanly).
+    """
+    path = state_dir / "events.ndjson"
+    if not path.exists():
+        return [], None
+    events: list[dict[str, Any]] = []
+    for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            return events, f"line {idx}: {exc}"
+    return events, None
 
 
 def _to_json(value: Any) -> str:
@@ -114,27 +130,37 @@ def _as_plain(value: Any) -> Any:
     return value
 
 
+def _unwrap_optional(typ: Any) -> Any:
+    """Return the inner type of ``Optional[T]`` / ``T | None``, else ``typ`` unchanged."""
+    if get_origin(typ) is Union:
+        non_none = [arg for arg in get_args(typ) if arg is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+    return typ
+
+
 def _from_dict(cls: type[T], data: dict[str, Any]) -> T:
+    """Reconstruct a config/state dataclass from its plain-dict JSON form.
+
+    Each field's resolved type hint drives reconstruction: a nested dataclass
+    field (including one wrapped in ``Optional``) is recursed into, while scalar
+    and collection fields pass through unchanged. Only ``RcrConfig``/``RcrState``
+    use this path; journal events are parsed separately.
+    """
+    hints = typing.get_type_hints(cls)
     kwargs: dict[str, Any] = {}
     for field_def in fields(cast(Any, cls)):
         if field_def.name not in data:
             continue
         value = data[field_def.name]
-        typ = field_def.type
-        if typ in (PrivacyConfig, "PrivacyConfig"):
-            value = _from_dict(PrivacyConfig, value)
-        elif typ in (FilePolicy, "FilePolicy"):
-            value = _from_dict(FilePolicy, value)
-        elif typ in (HashPolicy, "HashPolicy"):
-            value = _from_dict(HashPolicy, value)
-        elif typ in (RedactionConfig, "RedactionConfig"):
-            value = _from_dict(RedactionConfig, value)
-        elif typ in (ValidationConfig, "ValidationConfig"):
-            value = _from_dict(ValidationConfig, value)
-        elif typ in (RemoteJournalConfig, "RemoteJournalConfig"):
-            value = _from_dict(RemoteJournalConfig, value)
-        elif typ in (LastCheckpoint, "LastCheckpoint") or field_def.name == "last_checkpoint":
-            value = _from_dict(LastCheckpoint, value) if value else None
+        typ = _unwrap_optional(hints.get(field_def.name, field_def.type))
+        if isinstance(typ, type) and is_dataclass(typ):
+            nested = cast("type[Any]", typ)
+            if field_def.name == "last_checkpoint":
+                # An empty/absent checkpoint persists as a falsy value, not a nested object.
+                value = _from_dict(nested, value) if value else None
+            elif value is not None:
+                value = _from_dict(nested, value)
         kwargs[field_def.name] = value
     return cls(**kwargs)
 

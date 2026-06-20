@@ -1,10 +1,17 @@
+"""Translate Claude Code lifecycle hook events into journal events, enforce
+PreToolUse policy in enforced mode, and run the Stop-hook checkpoint/validate/
+block cycle. Hooks no-op when no run exists and redact before persisting."""
+
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from .context import ProjectContext
@@ -48,12 +55,17 @@ EVENT_MAP = {
 def handle_hook(
     event_name: str, payload: dict[str, Any], env: dict[str, str] | None = None
 ) -> HookResult:
-    # E7: validate payload is a dict and event name is recognized; no-op otherwise (SPEC §10.1.2).
+    """Dispatch a Claude Code lifecycle hook event into the run's journal.
+
+    Ignores non-dict payloads and never crashes on an unrecognized event. When no
+    run exists it no-ops (unless RCR_AUTO_START bootstraps one on a start event).
+    After the shared preamble (recover state, persist session_id) it routes to a
+    per-event handler from ``_HOOK_HANDLERS``; unmapped events fall through to the
+    hook.unknown type. EventWriter.append redacts every payload before persistence.
+    """
+    # Ignore non-dict payloads and never crash on an unrecognized event.
     if not isinstance(payload, dict):
         return HookResult()
-    if event_name not in EVENT_MAP and event_name != "PreToolUse":
-        # Unknown event — record it generically but don't crash.
-        pass  # fall through to generic handler below
     ctx = ProjectContext.from_cwd(
         payload.get("cwd") or env.get("CLAUDE_PROJECT_DIR") if env else None, env=env
     )
@@ -74,7 +86,7 @@ def handle_hook(
     from .recovery import ensure_recovered
 
     ensure_recovered(ctx.state_dir)
-    # Persist session_id from hook payload if not yet set
+    # Persist session_id from hook payload if not yet set.
     state = load_state(ctx.state_dir)
     incoming_session = payload.get("session_id") or (env or {}).get("CLAUDE_SESSION_ID")
     if incoming_session and state.session_id != incoming_session:
@@ -84,166 +96,203 @@ def handle_hook(
         write_state(ctx.state_dir, state)
     state = load_state(ctx.state_dir)
     writer = EventWriter(ctx.state_dir)
-    redactor = _redactor_for_state(ctx.state_dir)
 
-    if event_name == "SessionStart":
-        session_id = payload.get("session_id")
+    handler = _HOOK_HANDLERS.get(event_name)
+    if handler is not None:
+        return handler(ctx, state, writer, payload)
+    return _on_generic(ctx, state, writer, payload, event_name)
+
+
+def _on_session_start(
+    ctx: ProjectContext, state: RcrState, writer: EventWriter, payload: dict[str, Any]
+) -> HookResult:
+    session_id = payload.get("session_id")
+    writer.append(
+        "session.started",
+        payload,
+        source_kind="claude_hook",
+        session_id=session_id,
+    )
+    # state.json already exists at this point (handle_hook returns early otherwise),
+    # so this SessionStart is resuming an established run.
+    if not _run_is_terminal(read_events(ctx.state_dir)):
         writer.append(
-            "session.started",
-            _redacted_payload(payload, redactor),
+            "run.resumed",
+            {"cwd": str(ctx.cwd), "session_id": session_id},
             source_kind="claude_hook",
             session_id=session_id,
         )
-        # state.json already exists at this point (handle_hook returns early otherwise),
-        # so this SessionStart is resuming an established run.
-        if not _run_is_terminal(read_events(ctx.state_dir)):
+    return HookResult()
+
+
+def _on_pre_tool_use(
+    ctx: ProjectContext, state: RcrState, writer: EventWriter, payload: dict[str, Any]
+) -> HookResult:
+    redactor = _redactor_for_state(ctx.state_dir)
+    cfg = load_config(ctx.state_dir)
+    command = str(payload.get("tool_input", {}).get("command", ""))
+    if payload.get("tool_name") == "Bash" and state.mode == "enforced":
+        reason = _enforced_block_reason(command, state, cfg)
+        if reason:
             writer.append(
-                "run.resumed",
-                {"cwd": str(ctx.cwd), "session_id": session_id},
+                "tool.blocked",
+                {"tool_name": "Bash", "command": command, "reason": reason},
                 source_kind="claude_hook",
-                session_id=session_id,
             )
-        return HookResult()
-
-    if event_name == "PreToolUse":
-        cfg = load_config(ctx.state_dir)
-        command = str(payload.get("tool_input", {}).get("command", ""))
-        if payload.get("tool_name") == "Bash" and state.mode == "enforced":
-            reason = _enforced_block_reason(command, state, cfg)
-            if reason:
-                writer.append(
-                    "tool.blocked",
-                    {"tool_name": "Bash", "command": command, "reason": reason},
-                    source_kind="claude_hook",
-                )
-                return HookResult(
-                    stdout=json.dumps(
-                        {
-                            "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
-                                "permissionDecision": "deny",
-                                "permissionDecisionReason": reason,
-                            }
+            return HookResult(
+                stdout=json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": reason,
                         }
-                    )
+                    }
                 )
-        redacted_input = cast(dict[str, Any], redactor.redact_value(payload.get("tool_input", {}))[0])
-        writer.append(
-            "tool.requested",
-            {
-                "tool_name": payload.get("tool_name"),
-                "tool_input": redacted_input,
-            },
-            source_kind="claude_hook",
-        )
-        return HookResult()
+            )
+    redacted_input = cast(dict[str, Any], redactor.redact_value(payload.get("tool_input", {}))[0])
+    writer.append(
+        "tool.requested",
+        {
+            "tool_name": payload.get("tool_name"),
+            "tool_input": redacted_input,
+        },
+        source_kind="claude_hook",
+    )
+    return HookResult()
 
-    if event_name == "UserPromptSubmit":
-        raw_prompt = str(payload.get("prompt", ""))
-        result = redactor.redact_text(raw_prompt)
+
+def _on_user_prompt(
+    ctx: ProjectContext, state: RcrState, writer: EventWriter, payload: dict[str, Any]
+) -> HookResult:
+    redactor = _redactor_for_state(ctx.state_dir)
+    raw_prompt = str(payload.get("prompt", ""))
+    result = redactor.redact_text(raw_prompt)
+    writer.append(
+        "human.prompt",
+        {
+            "prompt_hash": hashlib.sha256(result.text.encode()).hexdigest(),
+            "prompt": result.text,
+        },
+        source_kind="claude_hook",
+        redacted=True,
+    )
+    if result.applied:
         writer.append(
-            "human.prompt",
-            {
-                "prompt_hash": __import__("hashlib").sha256(result.text.encode()).hexdigest(),
-                "prompt": result.text,
-            },
+            "redaction.applied",
+            redaction_event_payload("human.prompt", result),
             source_kind="claude_hook",
             redacted=True,
         )
-        if result.applied:
-            writer.append(
-                "redaction.applied",
-                redaction_event_payload("human.prompt", result),
-                source_kind="claude_hook",
-                redacted=True,
-            )
-        return HookResult()
+    return HookResult()
 
-    if event_name == "PostToolUse":
-        tool_name = str(payload.get("tool_name", ""))
-        file_event = _file_event_for_tool(tool_name)
-        if file_event:
-            file_path = str(payload.get("tool_input", {}).get("file_path", ""))
-            writer.append(
-                file_event,
-                {"path": file_path, "tool_name": tool_name},
-                source_kind="claude_hook",
-                inferred=True,
-            )
-            return HookResult()
+
+def _on_post_tool_use(
+    ctx: ProjectContext, state: RcrState, writer: EventWriter, payload: dict[str, Any]
+) -> HookResult:
+    tool_name = str(payload.get("tool_name", ""))
+    file_event = _file_event_for_tool(tool_name)
+    if file_event:
+        file_path = str(payload.get("tool_input", {}).get("file_path", ""))
         writer.append(
-            "tool.completed", _redacted_payload(payload, redactor), source_kind="claude_hook"
+            file_event,
+            {"path": file_path, "tool_name": tool_name},
+            source_kind="claude_hook",
+            inferred=True,
         )
         return HookResult()
+    writer.append("tool.completed", payload, source_kind="claude_hook")
+    return HookResult()
 
-    if event_name == "Stop":
-        from .materialize.builder import checkpoint
-        from .validation.validator import validate_run
 
-        cfg = load_config(ctx.state_dir)
-        writer.append("session.stop.requested", {"mode": state.mode}, source_kind="claude_hook")
-        checkpoint_rc = 0
-        if _is_stale(state):
-            try:
-                checkpoint_rc = checkpoint(ctx.state_dir, state.requested_profile or "auto")
-            except Exception as exc:
-                # A corrupt journal can make checkpoint raise; block with guidance
-                # instead of crashing the hook (SPEC §10.4 actionable stderr).
-                if state.mode == "advisory":
-                    return HookResult()
-                return HookResult(
-                    exit_code=2,
-                    stderr=(
-                        f"RO-Crate checkpoint failed: {exc}. "
-                        "Run rcr status and rcr validate, then repair provenance."
-                    ),
-                )
-        if state.mode == "advisory":
-            return HookResult()
-        report = validate_run(ctx.state_dir, public=False, append_event=False)
-        public_report = validate_run(ctx.state_dir, public=True, append_event=False)
-        public_findings = [
-            finding.message for finding in public_report.errors if finding.level == "privacy"
-        ]
-        raw_bypass = _detect_raw_bash_bypass(read_events(ctx.state_dir))
-        state = load_state(ctx.state_dir)
-        blockers = _stop_blockers(
-            state,
-            report,
-            checkpoint_rc,
-            mode=state.mode,
-            public_findings=public_findings,
-            raw_bypass=raw_bypass,
-        )
-        if blockers:
-            reasons = "; ".join(blockers)
+def _on_stop(
+    ctx: ProjectContext, state: RcrState, writer: EventWriter, payload: dict[str, Any]
+) -> HookResult:
+    from .materialize.builder import checkpoint
+    from .validation.validator import validate_run
+
+    writer.append("session.stop.requested", {"mode": state.mode}, source_kind="claude_hook")
+    checkpoint_rc = 0
+    if _is_stale(state):
+        try:
+            checkpoint_rc = checkpoint(ctx.state_dir, state.requested_profile or "auto")
+        except Exception as exc:
+            # A corrupt journal can make checkpoint raise; block with actionable
+            # guidance instead of crashing the hook.
+            if state.mode == "advisory":
+                return HookResult()
             return HookResult(
                 exit_code=2,
                 stderr=(
-                    f"RO-Crate provenance is not ready to stop: {reasons}. "
+                    f"RO-Crate checkpoint failed: {exc}. "
                     "Run rcr status and rcr validate, then repair provenance."
                 ),
             )
+    if state.mode == "advisory":
         return HookResult()
+    report = validate_run(ctx.state_dir, public=False, append_event=False)
+    public_report = validate_run(ctx.state_dir, public=True, append_event=False)
+    public_findings = [
+        finding.message for finding in public_report.errors if finding.level == "privacy"
+    ]
+    raw_bypass = _detect_raw_bash_bypass(read_events(ctx.state_dir))
+    state = load_state(ctx.state_dir)
+    blockers = _stop_blockers(
+        state,
+        report,
+        checkpoint_rc,
+        mode=state.mode,
+        public_findings=public_findings,
+        raw_bypass=raw_bypass,
+    )
+    if blockers:
+        reasons = "; ".join(blockers)
+        return HookResult(
+            exit_code=2,
+            stderr=(
+                f"RO-Crate provenance is not ready to stop: {reasons}. "
+                "Run rcr status and rcr validate, then repair provenance."
+            ),
+        )
+    return HookResult()
 
+
+def _on_generic(
+    ctx: ProjectContext,
+    state: RcrState,
+    writer: EventWriter,
+    payload: dict[str, Any],
+    event_name: str,
+) -> HookResult:
     mapped = EVENT_MAP.get(event_name)
     if mapped is not None:
-        event_type = mapped
-        out_payload = _redacted_payload(payload, redactor)
+        writer.append(mapped, payload, source_kind="claude_hook")
     else:
-        # L7: route any unmapped Claude lifecycle hook to the registered catch-all
-        # type so the L0 event-vocabulary check (and checkpoint) cannot hard-fail on
-        # an unknown event type. Preserve the original event name in the payload.
-        event_type = "hook.unknown"
-        out_payload = _redacted_payload({"hook_event": event_name, **payload}, redactor)
-    writer.append(event_type, out_payload, source_kind="claude_hook")
+        # Route unmapped lifecycle events to the hook.unknown type so the L0 vocabulary
+        # check cannot fail. Preserve the original event name in the payload.
+        writer.append(
+            "hook.unknown", {"hook_event": event_name, **payload}, source_kind="claude_hook"
+        )
     return HookResult()
+
+
+HookHandler = Callable[[ProjectContext, RcrState, EventWriter, dict[str, Any]], HookResult]
+
+# Per-event handlers. PreToolUse is registered explicitly because it is NOT in
+# EVENT_MAP — it carries blocking policy beyond plain name mapping.
+_HOOK_HANDLERS: dict[str, HookHandler] = {
+    "SessionStart": _on_session_start,
+    "PreToolUse": _on_pre_tool_use,
+    "UserPromptSubmit": _on_user_prompt,
+    "PostToolUse": _on_post_tool_use,
+    "Stop": _on_stop,
+}
 
 
 def main(event_name: str) -> int:
     import os as _os
 
-    # E8: re-entrancy guard — if a hook-triggered subprocess calls us again, no-op (SPEC §10.1.7).
+    # Re-entrancy guard: a hook-triggered subprocess that re-invokes us must no-op.
     if _os.environ.get("RCR_IN_HOOK"):
         return 0
     payload = json.loads(sys.stdin.read() or "{}")
@@ -257,37 +306,42 @@ def main(event_name: str) -> int:
     return result.exit_code
 
 
-def _redactor_for_state(state_dir: Any) -> Redactor:
-    return Redactor.from_config(load_config(state_dir), state_dir=state_dir)
+def _redactor_for_state(state_dir: Path) -> Redactor:
+    return Redactor.for_state_dir(state_dir)
 
 
-def _redacted_payload(payload: dict[str, Any], redactor: Redactor) -> dict[str, Any]:
-    return cast(dict[str, Any], json.loads(redactor.redact_text(json.dumps(payload)).text))
+# Read-only / capture-aware command prefixes that never count as a raw substantive
+# command needing `rcr run --`. python3 is handled separately because it depends on
+# what the script does.
+_ALLOWED_PREFIXES = (
+    "pwd",
+    "ls",
+    "git status",
+    "git rev-parse",
+    "git diff",
+    "cat ",
+    "head ",
+    "tail ",
+    "rcr ",
+)
 
 
 def _is_substantive_raw(command: str) -> bool:
+    """Return whether a Bash command is substantive work that should run via ``rcr run --``.
+
+    A command is NOT substantive when it is empty, an allow-listed read-only/capture
+    command, an `rcr`/rocrate hook invocation, or a `python3 ... rcr run` re-entry.
+    Any other non-empty command counts as substantive.
+    """
     stripped = command.strip()
-    allowed_prefixes = (
-        "pwd",
-        "ls",
-        "git status",
-        "git rev-parse",
-        "git diff",
-        "cat ",
-        "head ",
-        "tail ",
-        "rcr ",
-        "python3 ",
-    )
-    if stripped.startswith("python3") and "rocrate_" in stripped:
+    if not stripped:
         return False
-    if any(stripped == prefix or stripped.startswith(prefix) for prefix in allowed_prefixes):
-        return (
-            stripped.startswith("python3")
-            and "rcr run" not in stripped
-            and "rocrate_" not in stripped
-        )
-    return bool(stripped)
+    if stripped.startswith("python3"):
+        # An rcr/rocrate-driven python3 call is part of capture, not raw work.
+        return "rocrate_" not in stripped and "rcr run" not in stripped
+    if any(stripped == prefix or stripped.startswith(prefix) for prefix in _ALLOWED_PREFIXES):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +391,8 @@ def _stop_blockers(
         blockers.append("crate materialization failed")
     for finding in report.errors:
         # Critical structural failures (corrupt journal, bad state, invalid JSON-LD /
-        # RO-Crate) block in monitored mode too (SPEC §10.4); profile/reproducibility
-        # quality errors block only in enforced (via report.status below).
+        # RO-Crate) block in monitored mode too; profile/reproducibility quality errors
+        # block only in enforced (via report.status below).
         if (
             finding.level in {"journal", "state", "ro_crate"}
             or finding.code in _REQUIRED_METADATA_CODES
@@ -438,18 +492,24 @@ def _is_exfiltration(command: str) -> bool:
 
 
 def _enforced_block_reason(command: str, state: RcrState, cfg: RcrConfig) -> str | None:
-    # Policy b: writes into output roots — checked before the general substantive test
-    # so the more actionable message is returned when both conditions hold.
+    """Return the reason an enforced-mode Bash command is blocked, or None to allow it.
+
+    The specific guards (output-root writes, evidence deletion, exfiltration) are
+    checked before the general substantive-command catch-all so the more actionable
+    message wins when more than one condition holds.
+    """
+    # Blocks commands that write into a declared output root; checked first so the
+    # more specific message wins.
     if _writes_into_output_roots(command, cfg):
         return "Commands writing into declared output roots must run via rcr run --"
-    # Policy c: destructive evidence deletion — checked before general substantive test
-    # so specific evidence-protection message is returned.
+    # Blocks commands that delete provenance evidence; checked before the general
+    # substantive test so the evidence-protection message wins.
     if _is_destructive_to_evidence(command, state, cfg):
         return "Destructive commands that delete provenance evidence are blocked in enforced mode"
-    # Policy d: secret exfiltration / unsafe patterns
+    # Blocks secret-exfiltration / unsafe network patterns.
     if _is_exfiltration(command):
         return "Command matches a secret-exfiltration / unsafe pattern and is blocked"
-    # Policy a: raw substantive Bash (catch-all — must come last)
+    # Blocks raw substantive Bash; the catch-all, checked last.
     if _is_substantive_raw(command):
         return "Substantive commands must use rcr run -- in enforced mode"
     return None

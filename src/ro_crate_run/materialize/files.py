@@ -1,3 +1,6 @@
+"""File-inclusion policy: decide which declared/produced files are copied,
+referenced, or skipped."""
+
 from __future__ import annotations
 
 import fnmatch

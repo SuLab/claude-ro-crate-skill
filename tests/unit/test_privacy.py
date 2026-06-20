@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from ro_crate_run.config import default_config
-from ro_crate_run.privacy import PrivacyFinding, check_public_export_payload
+from ro_crate_run.models import PrivacyFinding
 from ro_crate_run.redaction import Redactor
 from ro_crate_run.validation.privacy import (
     check_privacy,
+    check_public_export_payload,
     env_findings,
     journal_findings,
     log_findings,

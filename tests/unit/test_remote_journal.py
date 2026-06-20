@@ -20,6 +20,17 @@ def test_file_mirror_appends(tmp_path: Path) -> None:
     assert target.read_text().splitlines() == ['{"sequence":1}', '{"sequence":2}']
 
 
+def test_mirror_reads_type_and_endpoint_directly(tmp_path: Path) -> None:
+    # The mirror routes on cfg.type/cfg.endpoint only; the dataclass has no legacy
+    # kind/target attributes, so a real RemoteJournalConfig must mirror via them.
+    target = tmp_path / "remote.ndjson"
+    cfg = RemoteJournalConfig(enabled=True, type="file", endpoint=str(target))
+    assert not hasattr(cfg, "kind")
+    assert not hasattr(cfg, "target")
+    assert mirror_event(cfg, '{"sequence":1}') is True
+    assert target.read_text() == '{"sequence":1}\n'
+
+
 def test_disabled_is_noop(tmp_path: Path) -> None:
     cfg = RemoteJournalConfig(enabled=False, type="file", endpoint=str(tmp_path / "x"))
     assert mirror_event(cfg, "{}") is False

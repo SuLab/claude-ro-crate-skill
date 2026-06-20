@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ro_crate_run.config import default_config
+from ro_crate_run.constants import dirty_effect
 from ro_crate_run.journal import EventWriter
 from ro_crate_run.state import (
     ensure_runtime_dirs,
@@ -83,3 +86,44 @@ def test_validation_events_preserve_or_mark_dirty_without_checkpointing(tmp_path
     assert load_state(state_dir).dirty is True
     writer.append("crate.validation.failed", {"status": "failed"}, source_kind="validator")
     assert load_state(state_dir).dirty is True
+
+
+def test_append_dirty_matches_dirty_effect(tmp_path: Path) -> None:
+    # The writer's dirty bookkeeping is driven entirely by constants.dirty_effect.
+    state_dir = tmp_path / ".ro-crate-run"
+    _bootstrap(state_dir)
+    writer = EventWriter(state_dir)
+
+    # A materializing event ("set") makes the crate stale.
+    assert dirty_effect("human.note") == "set"
+    writer.append("human.note", {"text": "x"}, source_kind="human_cli")
+    assert load_state(state_dir).dirty is True
+
+    # checkpoint.completed ("clear") materializes the pending events.
+    assert dirty_effect("crate.checkpoint.completed") == "clear"
+    writer.append("crate.checkpoint.completed", {"status": "passed"}, source_kind="materializer")
+    assert load_state(state_dir).dirty is False
+
+    # A "preserve" bookkeeping event leaves the freshly-clean state untouched.
+    assert dirty_effect("crate.checkpoint.started") == "preserve"
+    writer.append("crate.checkpoint.started", {}, source_kind="materializer")
+    assert load_state(state_dir).dirty is False
+
+
+def test_strict_events_raises_on_unregistered_type(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # With RCR_STRICT_EVENTS set, emitting a type outside the registered vocabulary
+    # fails loudly so authoring drift is caught in tests.
+    state_dir = tmp_path / ".ro-crate-run"
+    _bootstrap(state_dir)
+    monkeypatch.setenv("RCR_STRICT_EVENTS", "1")
+    with pytest.raises(ValueError, match="registered vocabulary"):
+        EventWriter(state_dir).append("not.a.real.event", {}, source_kind="materializer")
+
+
+def test_strict_events_unset_does_not_block_unknown_type(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Production (flag unset) must still degrade gracefully and persist the event.
+    state_dir = tmp_path / ".ro-crate-run"
+    _bootstrap(state_dir)
+    monkeypatch.delenv("RCR_STRICT_EVENTS", raising=False)
+    event = EventWriter(state_dir).append("not.a.real.event", {}, source_kind="materializer")
+    assert event.event_type == "not.a.real.event"

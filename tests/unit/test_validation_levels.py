@@ -227,6 +227,36 @@ def test_repro_warns_missing_software(tmp_path: Path, monkeypatch) -> None:  # t
     assert any(f.code == "missing_software_versions" and f.level == "reproducibility" for f in findings)
 
 
+def test_repro_missing_lockfiles_triggers_only_for_dependency_manifests(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    # missing_lockfiles is keyed exactly on constants.DEPENDENCY_MANIFESTS — every name
+    # in that tuple triggers the warning, and container build files (Dockerfile/
+    # Containerfile) deliberately do NOT.
+    from ro_crate_run.constants import CONTAINER_MANIFESTS, DEPENDENCY_MANIFESTS
+
+    for name in DEPENDENCY_MANIFESTS:
+        state_dir = _start(tmp_path, monkeypatch)
+        (tmp_path / name).write_text("x\n")
+        findings = check_reproducibility(build_context(state_dir, strict=False, public=False))
+        assert any(f.code == "missing_lockfiles" for f in findings), \
+            f"{name} should trigger missing_lockfiles"
+        (tmp_path / name).unlink()
+        # leftover state from prior iteration must not bleed across; start fresh dir
+        import shutil
+        shutil.rmtree(state_dir)
+
+    for name in CONTAINER_MANIFESTS:
+        state_dir = _start(tmp_path, monkeypatch)
+        (tmp_path / name).write_text("FROM scratch\n")
+        findings = check_reproducibility(build_context(state_dir, strict=False, public=False))
+        assert not any(f.code == "missing_lockfiles" for f in findings), \
+            f"{name} must not trigger missing_lockfiles"
+        (tmp_path / name).unlink()
+        import shutil
+        shutil.rmtree(state_dir)
+
+
 def test_repro_require_software_escalates_to_error(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     state_dir = _start(tmp_path, monkeypatch)
     cfg = _json.loads((state_dir / "config.json").read_text())

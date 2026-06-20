@@ -1,6 +1,11 @@
+"""Snakemake adapter: detect a ``Snakefile`` / ``.smk`` file and list its rules."""
+
 from __future__ import annotations
 
 from pathlib import Path
+
+engine_name = "snakemake"
+homepage = "https://snakemake.github.io/"
 
 
 def identify(path: Path) -> dict[str, object] | None:

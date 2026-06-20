@@ -25,11 +25,3 @@ def test_render_includes_commands_and_outputs(
     assert "out.txt" in html_text
     assert "python3" in html_text
     assert "$command_rows" not in html_text  # all placeholders substituted
-
-
-def test_render_preview_html_shim() -> None:
-    html_text = preview.render_preview_html({"title": "My Run"})
-    # Assert structure, not mere substring presence: the title must be wrapped in a <title>
-    # element and the preview header must be present.
-    assert "<title>My Run</title>" in html_text
-    assert "RO-Crate Run Preview" in html_text

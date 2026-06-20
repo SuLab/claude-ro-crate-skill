@@ -1,11 +1,15 @@
+"""Resolve the project root and the location of the ``.ro-crate-run`` state
+directory from the current working directory, honouring the CLAUDE_PROJECT_DIR /
+CLAUDE_PLUGIN_ROOT overrides."""
+
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import DEFAULT_STATE_DIR
+from .git import _git
 
 
 @dataclass(frozen=True)
@@ -49,18 +53,9 @@ class ProjectContext:
 
 
 def _discover_project(cwd: Path) -> Path:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(cwd),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            return Path(out.stdout.strip()).resolve()
-    except OSError:
-        pass
+    top = _git(["rev-parse", "--show-toplevel"], cwd)
+    if top:
+        return Path(top).resolve()
     for path in [cwd, *cwd.parents]:
         if (path / ".git").exists():
             return path

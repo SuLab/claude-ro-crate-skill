@@ -1,12 +1,16 @@
+"""Validation level 1 (state integrity): the derived state.json cache agrees
+with the journal — run id, hash-chain head, sequence, open phase/step, dirty
+accuracy, and the id-map shape."""
+
 from __future__ import annotations
 
 import json
 
+from ro_crate_run.constants import dirty_effect
+from ro_crate_run.ids import new_id_map
 from ro_crate_run.models import ValidationFinding
 
 from .context import ValidationContext
-
-_BOOKKEEPING_PREFIXES = ("crate.checkpoint", "crate.validation")
 
 
 def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
@@ -46,7 +50,7 @@ def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
         through = lc.materialized_through_sequence
         pending = any(
             int(e.get("sequence", 0)) > through
-            and not str(e.get("event_type", "")).startswith(_BOOKKEEPING_PREFIXES)
+            and dirty_effect(str(e.get("event_type", ""))) == "set"
             for e in events
         )
         if pending and not state.dirty:
@@ -69,7 +73,9 @@ def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
         except json.JSONDecodeError as exc:
             findings.append(ValidationFinding("state", "id_map_invalid", f"id-map.json is not valid JSON: {exc}"))
         else:
-            for key in ("event_to_entity", "path_to_entity", "step_to_entity"):
+            for key, default in new_id_map().items():
+                if not isinstance(default, dict):
+                    continue
                 if key in id_map and not isinstance(id_map[key], dict):
                     findings.append(ValidationFinding("state", "id_map_invalid", f"id-map.{key} must be an object"))
     return findings

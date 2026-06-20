@@ -1,3 +1,5 @@
+"""Compact run-summary projection written alongside the crate as run-summary.json."""
+
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -16,5 +18,4 @@ def run_summary(model: RunModel) -> dict[str, object]:
         "commands": [asdict(command) for command in model.commands],
         "inputs": model.inputs,
         "outputs": model.outputs,
-        "warnings": [],
     }

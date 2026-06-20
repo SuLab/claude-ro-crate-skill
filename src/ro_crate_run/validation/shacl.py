@@ -1,3 +1,8 @@
+"""Optional SHACL validation (strict mode only): validate the crate against the
+bundled shapes graph when pyshacl and a shapes graph are available. Findings are
+filed under the ``ro_crate`` level, and a missing pyshacl or shapes graph
+degrades gracefully to no findings."""
+
 from __future__ import annotations
 
 import json
@@ -19,7 +24,7 @@ def check_shacl(ctx: ValidationContext) -> list[ValidationFinding]:
     try:
         data = Graph()
         data.parse(data=json.dumps(_inline_contexts(ctx.metadata)), format="json-ld")
-        # SPEC §20.1: only run SHACL when a shapes graph is available.
+        # Only run SHACL when a shapes graph is available.
         # Calling pyshacl.validate(data, shacl_graph=None) validates data against
         # itself and always conforms — that is a false assurance, so we skip instead.
         shapes_graph = _load_shapes_graph()

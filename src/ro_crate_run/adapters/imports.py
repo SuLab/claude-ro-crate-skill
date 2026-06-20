@@ -1,3 +1,6 @@
+"""Import an existing RO-Crate by replaying its graph as journal events, so a
+crate produced elsewhere can be folded into the current run's provenance."""
+
 from __future__ import annotations
 
 import json

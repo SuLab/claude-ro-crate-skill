@@ -1,12 +1,57 @@
+"""Validation level 5: the public-export privacy gate.
+
+Scans a staged crate directory and its projected metadata for anything that must
+not leave the project — secrets, the raw event journal, raw human prompts,
+source code, git diffs, oversized logs, and environment variables outside the
+allowlist. Every finding at this level is an error: the gate fails closed so a
+public export ships nothing until the crate is clean.
+"""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
-from ..models import ValidationFinding
-from ..privacy import check_public_export_payload
-from ..redaction import Redactor
+from ..models import PrivacyFinding, ValidationFinding
+from ..redaction import Redactor, scan_file_for_secrets
+from ..state import read_events_safe
 from .context import ValidationContext
+
+
+def check_public_export_payload(
+    payload: Any, include_prompts: bool = False, redactor: Redactor | None = None
+) -> list[PrivacyFinding]:
+    """Scan an in-memory crate-metadata payload for prompts and secret patterns.
+
+    ``redactor`` lets a caller pass a config-derived redactor so the metadata
+    scan honors the same custom patterns as the on-disk file scan; it defaults
+    to the built-in pattern set.
+    """
+    findings: list[PrivacyFinding] = []
+    _scan(payload, "", include_prompts, findings, redactor or Redactor.default())
+    return findings
+
+
+def _scan(
+    value: Any,
+    path: str,
+    include_prompts: bool,
+    findings: list[PrivacyFinding],
+    redactor: Redactor,
+) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child = f"{path}.{key}" if path else str(key)
+            if "prompt" in str(key).lower() and not include_prompts:
+                findings.append(PrivacyFinding("error", "raw_prompt_in_public_export"))
+            _scan(item, child, include_prompts, findings, redactor)
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            _scan(item, f"{path}[{idx}]", include_prompts, findings, redactor)
+    elif isinstance(value, str):
+        if redactor.redact_text(value).applied:
+            findings.append(PrivacyFinding("error", "secret_pattern", path))
 
 
 def scan_crate_secrets(crate_dir: Path, redactor: Redactor) -> list[ValidationFinding]:
@@ -14,16 +59,10 @@ def scan_crate_secrets(crate_dir: Path, redactor: Redactor) -> list[ValidationFi
     for path in sorted(crate_dir.rglob("*")):
         if not path.is_file():
             continue
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        # Decode latin-1 (lossless byte->char) rather than skipping non-UTF-8 files: an
-        # ASCII secret embedded in an otherwise-binary blob must NOT make the gate fail open
-        # (a UnicodeDecodeError previously skipped the whole file). ASCII secret patterns
-        # still match under latin-1; only a truly unreadable file (OSError) is skipped.
-        text = raw.decode("latin-1")
-        if redactor.redact_text(text).applied:
+        # An ASCII secret can hide inside an otherwise-binary blob; the shared
+        # scanner decodes losslessly as latin-1 and skips only files that cannot
+        # be read at all, so a non-UTF-8 file never makes the gate fail open.
+        if scan_file_for_secrets(path, redactor):
             rel = path.relative_to(crate_dir).as_posix()
             findings.append(
                 ValidationFinding("privacy", "secret_pattern", f"Secret pattern found in {rel}", rel)
@@ -60,19 +99,12 @@ def journal_findings(
 
 def _journal_has_prompt(journal: Path) -> bool:
     try:
-        lines = journal.read_text(encoding="utf-8").splitlines()
+        events, _ = read_events_safe(journal.parent)
     except (UnicodeDecodeError, OSError):
         return False
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict) and event.get("event_type") == "human.prompt":
-            return True
-    return False
+    return any(
+        isinstance(event, dict) and event.get("event_type") == "human.prompt" for event in events
+    )
 
 
 def source_diff_findings(
@@ -166,6 +198,9 @@ def log_findings(
 def public_export_findings(ctx: ValidationContext) -> list[ValidationFinding]:
     crate_dir: Path = ctx.crate_dir if ctx.crate_dir is not None else ctx.state_dir / "ro-crate"
     cfg = ctx.cfg
+    # Build the redactor from the context's config (the production invariant is
+    # that it equals the on-disk config), resolving any relative custom-patterns
+    # file against the state directory.
     redactor = Redactor.from_config(cfg, state_dir=ctx.state_dir)
     findings: list[ValidationFinding] = []
     findings += scan_crate_secrets(crate_dir, redactor)
@@ -188,7 +223,9 @@ def public_export_findings(ctx: ValidationContext) -> list[ValidationFinding]:
     )
     metadata = ctx.metadata
     if metadata is not None and not cfg.privacy.include_prompts:
-        for pf in check_public_export_payload(metadata, include_prompts=False):
+        # Reuse the config redactor so the in-memory metadata scan matches the
+        # user's custom secret patterns exactly as the on-disk file scan does.
+        for pf in check_public_export_payload(metadata, include_prompts=False, redactor=redactor):
             findings.append(
                 ValidationFinding("privacy", pf.code, f"Privacy violation at {pf.path}", pf.path)
             )

@@ -1,6 +1,11 @@
+"""Common Workflow Language adapter: detect a ``.cwl`` workflow and list its steps."""
+
 from __future__ import annotations
 
 from pathlib import Path
+
+engine_name = "cwl"
+homepage = "https://www.commonwl.org/"
 
 
 def identify(path: Path) -> dict[str, object] | None:

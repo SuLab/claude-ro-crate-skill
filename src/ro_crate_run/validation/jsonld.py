@@ -1,3 +1,7 @@
+"""JSON-LD expansion for level-2 validation: inline the vendored RO-Crate and
+workflow-run contexts so a crate expands against pinned term definitions, then
+count the resulting RDF triples."""
+
 from __future__ import annotations
 
 import copy

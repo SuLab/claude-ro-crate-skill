@@ -1,3 +1,12 @@
+"""The ``rcr redact`` command: scan a project's captured files and event journal
+for secret patterns and, when applied, rewrite them with redacted copies.
+
+The scanning policy is shared with the export-time privacy gate (see
+`redaction.scan_file_for_secrets`): files are read losslessly as latin-1 so an
+ASCII secret embedded in a binary blob is still caught, and only an unreadable
+file (OSError) is skipped.
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,9 +15,9 @@ from typing import Any, cast
 
 from filelock import FileLock
 
-from .events import compute_event_hash
+from .events import compute_event_hash, dump_event_line
 from .journal import EventWriter
-from .redaction import Redactor
+from .redaction import Redactor, scan_file_for_secrets
 from .state import load_state, read_events, write_state
 from .time import utc_now, utc_now_compact
 
@@ -19,7 +28,7 @@ def redact_run(state_dir: Path, *, apply: bool = False, policy: Path | str | Non
     cfg = load_config(state_dir)
     redactor = Redactor.from_config(cfg, state_dir=state_dir)
     if policy:
-        redactor.patterns = [*redactor.patterns, *Redactor.load_patterns(Path(policy))]
+        redactor.add_patterns_from(Path(policy))
     findings = _scan_files(state_dir, redactor)
     report = {"status": "findings" if findings else "clean", "findings": findings}
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -55,11 +64,7 @@ def _scan_files(state_dir: Path, redactor: Redactor) -> list[dict[str, str]]:
     for path in _candidate_files(state_dir):
         if not path.exists() or not path.is_file():
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        if redactor.redact_text(text).applied:
+        if scan_file_for_secrets(path, redactor):
             findings.append({"path": _display_path(state_dir, path), "code": "secret_pattern"})
     return findings
 
@@ -70,13 +75,15 @@ def _redact_text_files(state_dir: Path, redactor: Redactor) -> None:
             continue
         if not path.exists() or not path.is_file():
             continue
+        # Read losslessly as latin-1 (matching the shared scan policy) so a
+        # non-UTF-8 file carrying an ASCII secret is rewritten rather than skipped.
         try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+            text = path.read_bytes().decode("latin-1")
+        except OSError:
             continue
         result = redactor.redact_text(text)
         if result.applied:
-            path.write_text(result.text, encoding="utf-8")
+            path.write_text(result.text, encoding="latin-1")
 
 
 def _redact_event_journal(state_dir: Path, redactor: Redactor) -> None:
@@ -102,10 +109,7 @@ def _redact_event_journal(state_dir: Path, redactor: Redactor) -> None:
             redacted_event["event_hash"] = compute_event_hash(redacted_event)
             previous = redacted_event["event_hash"]
             redacted_events.append(redacted_event)
-        payload = "".join(
-            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
-            for event in redacted_events
-        )
+        payload = "".join(dump_event_line(event) for event in redacted_events)
         report_path = state_dir / "reports" / "redacted-events.ndjson"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(payload, encoding="utf-8")

@@ -3,6 +3,11 @@
 Each function accepts a ``RunModel`` (or closely related inputs) and returns
 ``list[dict]`` graph fragments.  ``builder.py`` concatenates them, dedupes,
 strips nulls, and writes via ro-crate-py.
+
+Action ``actionStatus`` URIs come from ``constants`` (never literal strings),
+project-relative file ``@id``s come from ``ids.relative_file_id`` /
+``ids.file_ref``, and the actor roster (names, ``@type``, ids) comes from
+``events`` so the same identities are maintained in exactly one place.
 """
 from __future__ import annotations
 
@@ -10,27 +15,76 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ro_crate_run import __version__
-from ro_crate_run.ids import IdMap, software_entity_id
+from ro_crate_run import __version__, constants
+from ro_crate_run.events import ACTOR_NAMES, ACTOR_TYPES, crate_actor_id, engine_actor_id
+from ro_crate_run.ids import IdMap, file_ref, relative_file_id, software_entity_id
 from ro_crate_run.models import CommandRecord, RunModel
 
+
+def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of ``d`` with ``None``-valued keys removed."""
+    return {k: v for k, v in d.items() if v is not None}
+
+
+def _agent_action(
+    action_id: str,
+    type_: str,
+    name: str,
+    description: str,
+    start: Any,
+    end: Any,
+    *,
+    agent: str = "#actor/claude-code",
+    status: str = constants.ACTION_STATUS_COMPLETED,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build the common action-entity skeleton shared across the agent-action builders.
+
+    The fixed envelope is ``{@id,@type,name,description,startTime,endTime,actionStatus,agent}``;
+    ``agent`` and ``status`` are overridable (human-attributed and phase/blocked actions vary
+    them) and ``**extra`` carries builder-specific keys (instrument/object/result/error).
+    """
+    action: dict[str, Any] = {
+        "@id": action_id,
+        "@type": type_,
+        "name": name,
+        "description": description,
+        "startTime": start,
+        "endTime": end,
+        "actionStatus": {"@id": status},
+        "agent": {"@id": agent},
+    }
+    action.update(extra)
+    return action
+
+
 # ---------------------------------------------------------------------------
-# Actors (C4)
+# Actors
 # ---------------------------------------------------------------------------
 
 
 def build_actors(model: RunModel) -> list[dict[str, Any]]:
     """Emit stable actor entities for everyone involved in this run."""
+    from ro_crate_run import adapters
+
     env = model.environment or {}
     actors: list[dict[str, Any]] = [
-        {"@id": "#actor/human", "@type": "Person", "name": "Human operator"},
         {
-            "@id": "#actor/rcr",
-            "@type": "SoftwareApplication",
-            "name": "RO-Crate Run",
+            "@id": crate_actor_id("human"),
+            "@type": ACTOR_TYPES["human"],
+            "name": ACTOR_NAMES["human"],
+        },
+        {
+            "@id": crate_actor_id("rcr"),
+            "@type": ACTOR_TYPES["rcr"],
+            "name": ACTOR_NAMES["rcr"],
             "softwareVersion": __version__,
         },
-        {"@id": "#actor/claude-code", "@type": "SoftwareApplication", "name": "Claude Code"},
+        {
+            "@id": crate_actor_id("claude-code"),
+            "@type": ACTOR_TYPES["claude-code"],
+            "name": ACTOR_NAMES["claude-code"],
+        },
         {
             "@id": "#actor/ro-crate-py",
             "@type": "SoftwareApplication",
@@ -48,7 +102,7 @@ def build_actors(model: RunModel) -> list[dict[str, Any]]:
         actors.append(
             {
                 "@id": "#actor/claude-model",
-                # SPEC §15.5: model maps to SoftwareApplication (AIModel is not a context term).
+                # A model maps to SoftwareApplication (AIModel is not a context term).
                 "@type": "SoftwareApplication",
                 "name": str(env["claude_model"]),
             }
@@ -59,37 +113,26 @@ def build_actors(model: RunModel) -> list[dict[str, Any]]:
         )
     if model.workflow and model.workflow.get("engine") and model.workflow["engine"] != "unknown":
         engine = str(model.workflow["engine"])
-        # Base workflows.html MUST: a language/engine SoftwareApplication entity carries
-        # name + url + version. Supply the engine homepage from a local map and the observed
-        # engine version when the model carries one, else the placeholder "unknown".
+        # The base workflows.html MUST: a language/engine SoftwareApplication entity carries
+        # name + url + version. Take the engine homepage from the adapter registry and the
+        # observed engine version when the model carries one, else the placeholder "unknown".
         actors.append(
             {
-                "@id": f"#actor/engine/{engine}",
+                "@id": engine_actor_id(engine),
                 "@type": "SoftwareApplication",
                 "name": engine,
-                "url": _ENGINE_HOMEPAGE.get(engine.lower()),
+                "url": adapters.engine_homepage(engine.lower()),
                 "softwareVersion": str(
                     model.workflow.get("version") or model.workflow.get("engine_version") or "unknown"
                 ),
             }
         )
     # Strip None-valued fields before returning.
-    return [{k: v for k, v in actor.items() if v is not None} for actor in actors]
-
-
-# Engine homepage map (M5). Used to populate the engine SoftwareApplication `url`.
-_ENGINE_HOMEPAGE: dict[str, str] = {
-    "cwl": "https://www.commonwl.org/",
-    "cwltool": "https://www.commonwl.org/",
-    "snakemake": "https://snakemake.github.io/",
-    "nextflow": "https://www.nextflow.io/",
-    "galaxy": "https://galaxyproject.org/",
-    "wdl": "https://openwdl.org/",
-}
+    return [_strip_none(actor) for actor in actors]
 
 
 # ---------------------------------------------------------------------------
-# Software (C9)
+# Software
 # ---------------------------------------------------------------------------
 
 _DELETE_TOOLS = {"rm", "rmdir", "del", "unlink"}
@@ -130,7 +173,7 @@ def build_software(model: RunModel) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Command actions (C8)
+# Command actions
 # ---------------------------------------------------------------------------
 
 
@@ -167,24 +210,10 @@ def build_command_action(
     """
     action_type = command_action_type(cmd)
     completed = cmd.terminal_status == "completed"
-    status = (
-        "http://schema.org/CompletedActionStatus"
-        if completed
-        else "http://schema.org/FailedActionStatus"
-    )
+    status = constants.completed_or_failed(completed)
     instrument_name = os.path.basename(cmd.argv[0]) if cmd.argv else "unknown"
     instrument = software_entity_id(instrument_name)
     proj = Path(project_dir)
-
-    def _file_ref(path: str) -> dict[str, str]:
-        p = Path(path)
-        if p.is_absolute():
-            try:
-                rel = str(p.resolve().relative_to(proj.resolve()))
-                return {"@id": rel}
-            except ValueError:
-                return {"@id": p.as_uri()}
-        return {"@id": str(p)}
 
     action: dict[str, Any] = {
         "@id": cmd.action_id,
@@ -196,8 +225,8 @@ def build_command_action(
         "actionStatus": {"@id": status},
         "agent": {"@id": "#actor/human"},
         "instrument": {"@id": instrument},
-        "object": [_file_ref(p) for p in cmd.inputs],
-        "result": [_file_ref(p) for p in cmd.outputs],
+        "object": [file_ref(Path(p), proj) for p in cmd.inputs],
+        "result": [file_ref(Path(p), proj) for p in cmd.outputs],
     }
     if not completed:
         action["error"] = f"Command exited with code {cmd.exit_code}; see stderr log."
@@ -219,7 +248,7 @@ def build_command_action(
                 "encodingFormat": "application/json" if rel.endswith(".json") else "text/plain",
                 "about": {"@id": cmd.action_id},
             }
-            # L8-aux: base 1.2 SHOULD — contentSize on the sidecar/log File entity.
+            # Base 1.2 SHOULD — contentSize on the sidecar/log File entity.
             size = _content_size(rel, project_dir)
             if size is not None:
                 sidecar_entity["contentSize"] = size
@@ -237,18 +266,8 @@ def _action_name(cmd: CommandRecord) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent action families (SPEC §16: the agent's own actions ARE the workflow)
+# Agent action families: the agent's own actions ARE the workflow
 # ---------------------------------------------------------------------------
-
-
-def _relative_id(path: str, project_dir: os.PathLike[str] | str) -> str:
-    p = Path(path)
-    if p.is_absolute():
-        try:
-            return str(p.resolve().relative_to(Path(project_dir).resolve()))
-        except ValueError:
-            return p.as_uri()
-    return str(p)
 
 
 _FILE_OP_TYPE = {
@@ -276,7 +295,7 @@ def build_file_actions(
         path = str(fa.get("path", ""))
         if not path:
             continue
-        rel = _relative_id(path, project_dir)
+        rel = relative_file_id(Path(path), Path(project_dir))
         # Only materialize the action if its target file became a File entity; otherwise
         # the result/object ref would dangle (fail-safe: drop rather than dangle).
         if emitted_file_ids is not None and rel not in emitted_file_ids:
@@ -287,22 +306,17 @@ def build_file_actions(
             seen_tools.add(tool_id)
             entities.append({"@id": tool_id, "@type": "SoftwareApplication", "name": tool})
         op = str(fa.get("op", "modified"))
-        action: dict[str, Any] = {
-            "@id": f"#file-action/{fa.get('sequence')}",
-            "@type": _FILE_OP_TYPE.get(op, "UpdateAction"),
-            "name": f"{tool} {os.path.basename(rel)}",
-            "description": f"Claude agent {op} {rel} via the {tool} tool.",
-            "startTime": fa.get("timestamp"),
-            "endTime": fa.get("timestamp"),
-            "actionStatus": {"@id": "http://schema.org/CompletedActionStatus"},
-            "agent": {"@id": "#actor/claude-code"},
-            "instrument": {"@id": tool_id},
-        }
         ref = {"@id": rel}
-        if op == "deleted":
-            action["object"] = [ref]
-        else:
-            action["result"] = [ref]
+        action = _agent_action(
+            f"#file-action/{fa.get('sequence')}",
+            _FILE_OP_TYPE.get(op, "UpdateAction"),
+            f"{tool} {os.path.basename(rel)}",
+            f"Claude agent {op} {rel} via the {tool} tool.",
+            fa.get("timestamp"),
+            fa.get("timestamp"),
+            instrument={"@id": tool_id},
+        )
+        action["object" if op == "deleted" else "result"] = [ref]
         entities.append(action)
     return entities
 
@@ -320,21 +334,21 @@ def build_raw_command_actions(model: RunModel) -> list[dict[str, Any]]:
         if tool_id not in seen_tools:
             seen_tools.add(tool_id)
             entities.append({"@id": tool_id, "@type": "SoftwareApplication", "name": argv0})
-        entities.append({
-            "@id": f"#raw-command/{rc.get('sequence')}",
-            "@type": "CreateAction",
-            "name": command[:100],
-            "description": "Raw shell command run by the agent outside rcr run.",
-            "startTime": rc.get("timestamp"),
-            "endTime": rc.get("timestamp"),
-            "actionStatus": {"@id": "http://schema.org/CompletedActionStatus"},
-            "agent": {"@id": "#actor/claude-code"},
-            "instrument": {"@id": tool_id},
-            # L4: Process 0.5 — object MAY. rcr cannot infer the outputs of an unwrapped bash
-            # command (so result is intentionally absent), but the command operates on the
-            # crate's root dataset, so reference it via `object` to improve the SHOULD-quality.
-            "object": [{"@id": "./"}],
-        })
+        entities.append(
+            _agent_action(
+                f"#raw-command/{rc.get('sequence')}",
+                "CreateAction",
+                command[:100],
+                "Raw shell command run by the agent outside rcr run.",
+                rc.get("timestamp"),
+                rc.get("timestamp"),
+                instrument={"@id": tool_id},
+                # Process 0.5 — object MAY. rcr cannot infer the outputs of an unwrapped bash
+                # command (so result is intentionally absent), but the command operates on the
+                # crate's root dataset, so reference it via `object` to improve SHOULD-quality.
+                object=[{"@id": "./"}],
+            )
+        )
     return entities
 
 
@@ -355,19 +369,19 @@ def build_subagent_actions(model: RunModel) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     for tid in order:
         s = by_task[tid]
-        entities.append({
-            "@id": f"#subagent/{s.get('sequence')}",
-            # M6: OrganizeAction is reserved (Provenance 0.5) for the engine-orchestration
-            # hierarchy (instrument=engine, object=ControlActions, result=workflow CreateAction).
-            # A subagent dispatch has none of those, so it is a generic Action.
-            "@type": "Action",
-            "name": f"Dispatch subagent {s.get('subagent_type') or tid}",
-            "description": str(s.get("description") or "Subagent task dispatched by the agent."),
-            "startTime": s.get("timestamp"),
-            "endTime": s.get("end", s.get("timestamp")),
-            "actionStatus": {"@id": "http://schema.org/CompletedActionStatus"},
-            "agent": {"@id": "#actor/claude-code"},
-        })
+        # OrganizeAction is reserved (Provenance 0.5) for the engine-orchestration hierarchy
+        # (instrument=engine, object=ControlActions, result=workflow CreateAction). A subagent
+        # dispatch has none of those roles, so it is a generic Action.
+        entities.append(
+            _agent_action(
+                f"#subagent/{s.get('sequence')}",
+                "Action",
+                f"Dispatch subagent {s.get('subagent_type') or tid}",
+                str(s.get("description") or "Subagent task dispatched by the agent."),
+                s.get("timestamp"),
+                s.get("end", s.get("timestamp")),
+            )
+        )
     return entities
 
 
@@ -377,17 +391,18 @@ def build_blocked_actions(model: RunModel) -> list[dict[str, Any]]:
     for b in model.blocked_actions:
         reason = str(b.get("reason") or "blocked")
         label = "Failed" if b.get("kind") == "tool-failed" else "Blocked"
-        entities.append({
-            "@id": f"#blocked/{b.get('sequence')}",
-            "@type": "Action",
-            "name": f"{label}: {b.get('tool_name') or b.get('kind') or 'action'}",
-            "description": reason,
-            "startTime": b.get("timestamp"),
-            "endTime": b.get("timestamp"),
-            "actionStatus": {"@id": "http://schema.org/FailedActionStatus"},
-            "error": reason,
-            "agent": {"@id": "#actor/claude-code"},
-        })
+        entities.append(
+            _agent_action(
+                f"#blocked/{b.get('sequence')}",
+                "Action",
+                f"{label}: {b.get('tool_name') or b.get('kind') or 'action'}",
+                reason,
+                b.get("timestamp"),
+                b.get("timestamp"),
+                status=constants.ACTION_STATUS_FAILED,
+                error=reason,
+            )
+        )
     return entities
 
 
@@ -419,16 +434,16 @@ def build_tool_uses(model: RunModel) -> list[dict[str, Any]]:
         last_ts[name] = t.get("timestamp")
     entities: list[dict[str, Any]] = []
     for name, count in counts.items():
-        entities.append({
-            "@id": f"#tool-use/{name}",
-            "@type": "Action",
-            "name": f"Used {name} ({count}x)",
-            "description": f"The agent used the {name} tool {count} time(s).",
-            "startTime": first_ts.get(name),
-            "endTime": last_ts.get(name),
-            "actionStatus": {"@id": "http://schema.org/CompletedActionStatus"},
-            "agent": {"@id": "#actor/claude-code"},
-        })
+        entities.append(
+            _agent_action(
+                f"#tool-use/{name}",
+                "Action",
+                f"Used {name} ({count}x)",
+                f"The agent used the {name} tool {count} time(s).",
+                first_ts.get(name),
+                last_ts.get(name),
+            )
+        )
     return entities
 
 
@@ -438,16 +453,16 @@ def build_housekeeping(model: RunModel) -> list[dict[str, Any]]:
     for h in model.housekeeping:
         event = str(h.get("event", ""))
         detail = str(h.get("detail", ""))
-        entities.append({
-            "@id": f"#housekeeping/{h.get('sequence')}",
-            "@type": "Action",
-            "name": event.replace(".", " ").strip() or "housekeeping",
-            "description": f"{event}{': ' + detail if detail else ''}",
-            "startTime": h.get("timestamp"),
-            "endTime": h.get("timestamp"),
-            "actionStatus": {"@id": "http://schema.org/CompletedActionStatus"},
-            "agent": {"@id": "#actor/claude-code"},
-        })
+        entities.append(
+            _agent_action(
+                f"#housekeeping/{h.get('sequence')}",
+                "Action",
+                event.replace(".", " ").strip() or "housekeeping",
+                f"{event}{': ' + detail if detail else ''}",
+                h.get("timestamp"),
+                h.get("timestamp"),
+            )
+        )
     return entities
 
 
@@ -456,22 +471,17 @@ def build_results(model: RunModel) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     for idx, r in enumerate(model.results, start=1):
         accepted = bool(r.get("accepted"))
-        status = (
-            "http://schema.org/CompletedActionStatus"
-            if accepted
-            else "http://schema.org/FailedActionStatus"
+        entity = _agent_action(
+            f"#result/{idx}",
+            "AssessAction",
+            "Accepted result" if accepted else "Rejected result",
+            str(r.get("text", "")),
+            r.get("timestamp"),
+            r.get("timestamp"),
+            agent="#actor/human",
+            status=constants.completed_or_failed(accepted),
+            object={"@id": "./"},
         )
-        entity: dict[str, Any] = {
-            "@id": f"#result/{idx}",
-            "@type": "AssessAction",
-            "name": "Accepted result" if accepted else "Rejected result",
-            "description": str(r.get("text", "")),
-            "startTime": r.get("timestamp"),
-            "endTime": r.get("timestamp"),
-            "actionStatus": {"@id": status},
-            "agent": {"@id": "#actor/human"},
-            "object": {"@id": "./"},
-        }
         if not accepted:
             # A FailedActionStatus action must carry an error (L3 profile rule).
             entity["error"] = str(r.get("text", "")) or "result rejected"
@@ -484,23 +494,20 @@ def build_phase_actions(model: RunModel) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     for idx, (name, phase) in enumerate(model.phases.items(), start=1):
         status = phase.get("status", "")
-        action_status = (
-            "http://schema.org/CompletedActionStatus"
-            if status == "completed"
-            else "http://schema.org/ActiveActionStatus"
+        # OrganizeAction is reserved (Provenance 0.5) for engine orchestration; a human
+        # work-phase grouping is a generic Action. The grouping is Active until completed.
+        entities.append(
+            _agent_action(
+                f"#phase/{idx}",
+                "Action",
+                f"Phase: {name}",
+                f"Project phase {name!r} ({status or 'started'}).",
+                phase.get("timestamp"),
+                phase.get("end_timestamp") or phase.get("timestamp"),
+                agent="#actor/human",
+                status=constants.completed_or_active(status == "completed"),
+            )
         )
-        entities.append({
-            "@id": f"#phase/{idx}",
-            # M6: OrganizeAction is reserved (Provenance 0.5) for engine orchestration; a
-            # human work-phase grouping is a generic Action.
-            "@type": "Action",
-            "name": f"Phase: {name}",
-            "description": f"Project phase {name!r} ({status or 'started'}).",
-            "startTime": phase.get("timestamp"),
-            "endTime": phase.get("end_timestamp") or phase.get("timestamp"),
-            "actionStatus": {"@id": action_status},
-            "agent": {"@id": "#actor/human"},
-        })
     return entities
 
 
@@ -509,7 +516,7 @@ def build_agent_actions(
     project_dir: os.PathLike[str] | str,
     emitted_file_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Aggregate every agent-action family into crate entities (SPEC §16)."""
+    """Aggregate every agent-action family into crate entities."""
     entities: list[dict[str, Any]] = []
     entities += build_file_actions(model, project_dir, emitted_file_ids)
     entities += build_raw_command_actions(model)
@@ -524,7 +531,7 @@ def build_agent_actions(
 
 
 # ---------------------------------------------------------------------------
-# File entities (§15.6)
+# File entities
 # ---------------------------------------------------------------------------
 
 
@@ -579,7 +586,7 @@ def build_file_entity(
         })
     # Materialize the declared existence classification (observed-local/remote, generated,
     # expected, missing, declared-only) so a crate consumer can tell an observed input from
-    # an expected-but-absent output — otherwise this lives only in state.json (SPEC §11).
+    # an expected-but-absent output — otherwise this lives only in state.json.
     existence = declared.get("existence")
     if existence:
         add_props.append({
@@ -592,11 +599,11 @@ def build_file_entity(
         entity["additionalProperty"] = add_props[0] if len(add_props) == 1 else add_props
     if formal_parameter_id:
         entity["exampleOfWork"] = {"@id": formal_parameter_id}
-    return {k: v for k, v in entity.items() if v is not None}
+    return _strip_none(entity)
 
 
 # ---------------------------------------------------------------------------
-# Parameters / FormalParameters (C10)
+# Parameters / FormalParameters
 # ---------------------------------------------------------------------------
 
 
@@ -653,7 +660,7 @@ def workflow_formal_parameters(
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Return (FormalParameter entities, path→formal_parameter_id map) for
     workflow/provenance profiles; returns ([], {}) for process profile."""
-    if model.selected_profile not in {"workflow", "provenance"} or not model.workflow:
+    if model.selected_profile not in constants.WORKFLOW_LIKE_PROFILES or not model.workflow:
         return [], {}
     wf_path = str(model.workflow.get("path", ""))
     params: list[dict[str, Any]] = []
@@ -662,7 +669,7 @@ def workflow_formal_parameters(
         for item in items:
             path = str(item.get("path", ""))
             if not path or path == wf_path or item.get("role") in {"workflow-definition", "config"}:
-                # SPEC §15.9.7: config-role files are plain File entities only, no FormalParameter.
+                # config-role files are plain File entities only, no FormalParameter.
                 continue
             fp_id = f"#formal/{kind}/{os.path.basename(path)}"
             path_map[path] = fp_id
@@ -683,7 +690,7 @@ def workflow_formal_parameters(
 
 
 # ---------------------------------------------------------------------------
-# Workflow (C11, C16, §15.7, §15.9)
+# Workflow
 # ---------------------------------------------------------------------------
 
 
@@ -716,7 +723,7 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
         # Reference the engine SoftwareApplication (#actor/engine/<engine>) build_actors emits,
         # so it is not an orphan; fall back to a plain string for an unknown engine.
         "programmingLanguage": (
-            {"@id": f"#actor/engine/{model.workflow['engine']}"}
+            {"@id": engine_actor_id(str(model.workflow["engine"]))}
             if model.workflow.get("engine") and model.workflow["engine"] != "unknown"
             else model.workflow.get("engine", "workflow")
         ),
@@ -739,9 +746,9 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
         entity["step"] = [
             {"@id": idmap.entity_for_step(step_id)} for step_id in sorted(model.steps)
         ]
-    # H4: Provenance 0.5 MUST — the ComputationalWorkflow's hasPart references the @ids of
-    # the orchestrated tools (the SoftwareApplications the steps invoke + the engine). Every
-    # ref MUST resolve, so we only list ids that build_software / build_actors actually emit.
+    # Provenance 0.5 MUST — the ComputationalWorkflow's hasPart references the @ids of the
+    # orchestrated tools (the SoftwareApplications the steps invoke + the engine). Every ref
+    # MUST resolve, so we only list ids that build_software / build_actors actually emit.
     tool_ids = _orchestrated_tool_ids(model)
     if tool_ids:
         entity["hasPart"] = [{"@id": tid} for tid in tool_ids]
@@ -749,7 +756,7 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
 
 
 def _orchestrated_tool_ids(model: RunModel) -> list[str]:
-    """Return the ordered, de-duplicated @ids of tools orchestrated by the workflow (H4).
+    """Return the ordered, de-duplicated @ids of tools orchestrated by the workflow.
 
     Sources, all of which are guaranteed emitted elsewhere so the refs resolve:
     - the per-command tool `#software/<basename>` ids (emitted by build_software via commands),
@@ -772,12 +779,12 @@ def _orchestrated_tool_ids(model: RunModel) -> list[str]:
         _add(software_entity_id(name))
     engine = (model.workflow or {}).get("engine")
     if engine and engine != "unknown":
-        _add(f"#actor/engine/{engine}")
+        _add(engine_actor_id(str(engine)))
     return ids
 
 
 # ---------------------------------------------------------------------------
-# Workflow-level action (§15.9.5)
+# Workflow-level action
 # ---------------------------------------------------------------------------
 
 
@@ -798,23 +805,11 @@ def build_workflow_action(
     if not (model.commands or model.file_actions or model.raw_commands):
         return []
     proj = Path(project_dir)
-    workflow_status = (
-        "http://schema.org/FailedActionStatus"
-        if any(c.terminal_status == "failed" for c in model.commands)
-        else "http://schema.org/CompletedActionStatus"
-    )
+    failed = any(c.terminal_status == "failed" for c in model.commands)
+    workflow_status = constants.completed_or_failed(not failed)
     workflow_action_id = idmap.entity_for_event(
         f"workflow-run:{model.run_id}", "workflow-action"
     )
-
-    def _ref(path: str) -> dict[str, str]:
-        p = Path(path)
-        if p.is_absolute():
-            try:
-                return {"@id": str(p.resolve().relative_to(proj.resolve()))}
-            except ValueError:
-                return {"@id": p.as_uri()}
-        return {"@id": str(p)}
 
     if model.commands:
         start_time = model.commands[0].started_at
@@ -844,20 +839,20 @@ def build_workflow_action(
         "agent": {"@id": agent_id},
         "instrument": {"@id": wf_id},
         "object": [
-            _ref(str(item["path"]))
+            file_ref(Path(str(item["path"])), proj)
             for item in model.inputs
             if str(item.get("path", "")) != wf_path
         ],
-        "result": [_ref(str(item["path"])) for item in model.outputs],
+        "result": [file_ref(Path(str(item["path"])), proj) for item in model.outputs],
     }
-    if workflow_status.endswith("FailedActionStatus"):
+    if failed:
         # L3: a FailedActionStatus action must carry an error.
         action["error"] = "One or more commands in the workflow failed; see the command actions."
     return [action]
 
 
 # ---------------------------------------------------------------------------
-# Steps (C11)
+# Steps
 # ---------------------------------------------------------------------------
 
 
@@ -892,15 +887,15 @@ def build_workflow_timeline(
 
 
 _STEP_STATUS_URI = {
-    "started": "http://schema.org/ActiveActionStatus",
-    "completed": "http://schema.org/CompletedActionStatus",
-    "failed": "http://schema.org/FailedActionStatus",
-    "skipped": "http://schema.org/FailedActionStatus",
+    "started": constants.ACTION_STATUS_ACTIVE,
+    "completed": constants.ACTION_STATUS_COMPLETED,
+    "failed": constants.ACTION_STATUS_FAILED,
+    "skipped": constants.ACTION_STATUS_FAILED,
 }
 
 
 def _step_fallback_workexample(model: RunModel) -> str | None:
-    """Return the @id used as a command-less step's `workExample` (H3).
+    """Return the @id used as a command-less step's `workExample`.
 
     Prefer the workflow engine SoftwareApplication (`#actor/engine/<engine>`, emitted by
     build_actors when the engine is known); otherwise fall back to the workflow entity
@@ -909,7 +904,7 @@ def _step_fallback_workexample(model: RunModel) -> str | None:
     wf = model.workflow or {}
     engine = wf.get("engine")
     if engine and engine != "unknown":
-        return f"#actor/engine/{engine}"
+        return engine_actor_id(str(engine))
     path = wf.get("path")
     return str(path) if path else None
 
@@ -929,7 +924,7 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
     for cmd in model.commands:
         if cmd.step_id:
             cmd_by_step.setdefault(cmd.step_id, cmd)
-    # H3: workExample MUST be set on EVERY HowToStep (Provenance 0.5 MUST). A command-less
+    # workExample MUST be set on EVERY HowToStep (Provenance 0.5 MUST). A command-less
     # step (e.g. Snakemake `all`) falls back to the engine SoftwareApplication / the workflow.
     fallback_workexample = _step_fallback_workexample(model)
     entities: list[dict[str, Any]] = []
@@ -961,7 +956,7 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
                     "object": {"@id": step_cmd.action_id},
                     "actionStatus": {
                         "@id": _STEP_STATUS_URI.get(
-                            status, "http://schema.org/CompletedActionStatus"
+                            status, constants.ACTION_STATUS_COMPLETED
                         )
                     },
                 }
@@ -970,7 +965,7 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Git (C5, §15.12)
+# Git
 # ---------------------------------------------------------------------------
 
 
@@ -980,7 +975,7 @@ def build_git(
     """Emit a #git/state Thing entity (plus optional diff File entity).
 
     ``project_dir`` (optional) is used only to compute ``contentSize`` on the git-diff
-    File entity (L8-aux, base 1.2 SHOULD).
+    File entity (base 1.2 SHOULD).
     """
     git = model.git or {}
     if not git.get("available"):
@@ -1004,7 +999,7 @@ def build_git(
         "identifier": git.get("commit"),
         "additionalProperty": props,
     }
-    entities: list[dict[str, Any]] = [{k: v for k, v in entity.items() if v is not None}]
+    entities: list[dict[str, Any]] = [_strip_none(entity)]
     if git.get("diff_file"):
         diff_entity: dict[str, Any] = {
             "@id": str(git["diff_file"]),
@@ -1022,7 +1017,7 @@ def build_git(
 
 
 # ---------------------------------------------------------------------------
-# Environment / Containers / Dependencies (C6, §15.11)
+# Environment / Containers / Dependencies
 # ---------------------------------------------------------------------------
 
 
@@ -1042,7 +1037,7 @@ _SIF_IMAGE_TYPE = "https://w3id.org/ro/terms/workflow-run#SIFImage"
 
 
 def _container_additional_type(registry: str, image: str, tag: str) -> str:
-    """Derive the ContainerImage additionalType URI from the registry/ref (M7).
+    """Derive the ContainerImage additionalType URI from the registry/ref.
 
     SIF / Singularity / Apptainer references → SIFImage; everything else (OCI/Docker
     registries: docker.io, ghcr.io, quay.io, registry.*, or an unqualified default) → DockerImage.
@@ -1062,8 +1057,8 @@ def build_containers(model: RunModel) -> list[dict[str, Any]]:
         entity = {
             "@id": f"#container/{idx}",
             "@type": "ContainerImage",
-            # M7: Process/Workflow 0.5 SHOULD — ContainerImage SHOULD list additionalType
-            # (a workflow-run namespace URI) alongside registry + name.
+            # ContainerImage SHOULD list additionalType (a workflow-run namespace URI)
+            # alongside registry + name (Process/Workflow 0.5 SHOULD).
             "additionalType": {
                 "@id": _container_additional_type(
                     str(container.get("registry", "")),
@@ -1076,7 +1071,7 @@ def build_containers(model: RunModel) -> list[dict[str, Any]]:
             "tag": container.get("tag"),
             "sha256": digest or None,
         }
-        entities.append({k: v for k, v in entity.items() if v is not None})
+        entities.append(_strip_none(entity))
     return entities
 
 
@@ -1087,7 +1082,7 @@ def build_dependencies(
 
     Carries the recorded sha256 so the manifest is verifiable (the digest is captured at
     scan time but was previously dropped), and gives it a sensible description.
-    ``project_dir`` (optional) is used only to populate ``contentSize`` (L8-aux, base 1.2 SHOULD).
+    ``project_dir`` (optional) is used only to populate ``contentSize`` (base 1.2 SHOULD).
     """
     entities: list[dict[str, Any]] = []
     for dep in model.dependencies:
@@ -1115,7 +1110,7 @@ def build_dependencies(
 
 
 # ---------------------------------------------------------------------------
-# Notes & decisions (§15.10.8)
+# Notes & decisions
 # ---------------------------------------------------------------------------
 
 
@@ -1149,7 +1144,7 @@ def build_notes_decisions(model: RunModel) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# ParameterConnection (§15.10.8 MAY)
+# ParameterConnection
 # ---------------------------------------------------------------------------
 
 
@@ -1171,7 +1166,7 @@ def build_parameter_connections(model: RunModel) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Profile-selection confidence (C15)
+# Profile-selection confidence
 # ---------------------------------------------------------------------------
 
 

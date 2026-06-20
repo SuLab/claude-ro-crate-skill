@@ -1,3 +1,6 @@
+"""Pure reducer: folds the event log up to a high-water sequence into an immutable
+RunModel. Crate-output changes belong here, never in stored state."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,6 +12,8 @@ from ro_crate_run.state import load_state, read_events
 
 
 def build_run_model(state_dir: Path, through_sequence: int | None = None) -> RunModel:
+    """Reduce the append-only event journal up to through_sequence into an immutable
+    RunModel via pure projection; reads events/state only, never mutates stored state."""
     state = load_state(state_dir)
     raw = [
         item
@@ -281,10 +286,8 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
                 "sequence": event.sequence,
             })
     model.commands = list(commands_by_id.values())
-    from .profiles import select_profile, synthesize_workflow
-    selection = select_profile(model, state.requested_profile)
-    model.selected_profile = selection.profile
-    model.profile_uri = selection.profile_uri
+    from .profiles import apply_selection, synthesize_workflow
+    apply_selection(model, state.requested_profile)
     # The agent's actions are the workflow: when workflow/provenance is selected with no
     # external definition file, synthesize one so the crate conforms (SPEC §16).
     synthesize_workflow(model)
@@ -303,7 +306,7 @@ def _tool_decision(
 ) -> dict[str, Any] | None:
     """Project a human decision-point tool.completed event into a tool_decisions dict.
 
-    Shapes confirmed by injecting real PostToolUse events through the hook path:
+    Expected shapes of the PostToolUse tool.completed event:
       - AskUserQuestion: tool_input.questions[] (each {header, question, multiSelect,
         options[]{label, description}}); tool_response.answers[] (each {header, question,
         selected[]}). A single call may carry multiple questions.
