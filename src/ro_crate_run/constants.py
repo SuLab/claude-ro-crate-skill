@@ -34,8 +34,6 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "human.prompt",
         "human.accepted_result",
         "human.rejected_result",
-        "human.declared_input",
-        "human.declared_output",
         # Workflow
         "workflow.identified",
         "workflow.input.declared",
@@ -84,11 +82,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "file.modified",
         "file.deleted",
         "file.changed",
-        "file.hashed",
-        "dataset.observed",
-        "dataset.hashed",
         # Git
-        "git.state.observed",
         "git.worktree.created",
         "git.worktree.removed",
         # Crate / validation / signing
