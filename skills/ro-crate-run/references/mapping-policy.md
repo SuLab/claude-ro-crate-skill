@@ -11,8 +11,7 @@
 | source_kind           | @type               | @id                | name            |
 |-----------------------|---------------------|--------------------|-----------------|
 | human_cli             | Person              | actor:human        | Human operator  |
-| claude_hook (prompt)  | AIModel             | actor:claude       | Claude          |
-| claude_hook (other)   | SoftwareApplication | actor:claude-code  | Claude Code     |
+| claude_hook           | SoftwareApplication | actor:claude-code  | Claude Code     |
 | skill_command         | SoftwareApplication | actor:rcr          | RO-Crate Run    |
 | materializer          | SoftwareApplication | actor:rcr          | RO-Crate Run    |
 | validator             | SoftwareApplication | actor:rcr          | RO-Crate Run    |
@@ -30,7 +29,7 @@
 
 - Any captured software tool is a `SoftwareApplication` entity.
 - A script becomes `["File", "SoftwareSourceCode", "ComputationalWorkflow"]` ONLY when it orchestrates multiple steps — a single-command script is NOT a workflow definition.
-- Workflow engine is a `SoftwareApplication` with `name` and `version` fields.
+- Workflow engine is a `SoftwareApplication` (`#actor/engine/<engine>`) with a `name` field.
 
 ## Command Action Type Selection (SPEC §15.8)
 
@@ -57,7 +56,7 @@
 ## Environment, Container, Dependency (SPEC §15.11)
 
 - Capture OS, Python version, CPU/memory as `PropertyValue` entities on the run action.
-- Container images: `SoftwareApplication` with `containerImage` property.
+- Container images: `ContainerImage` entity with `registry`, `name`, `tag`, and `sha256` properties.
 - Dependency lock files: `File` entities attached to the root action.
 
 ## Git / Source State (SPEC §15.12)

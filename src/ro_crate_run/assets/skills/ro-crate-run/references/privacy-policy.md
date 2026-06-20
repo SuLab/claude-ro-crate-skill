@@ -4,8 +4,8 @@
 
 | Data class              | Default       | Override via config                    |
 |-------------------------|---------------|----------------------------------------|
-| Command stdout/stderr   | private       | `privacy.capture_stdout`               |
-| Environment variables   | private       | `privacy.env_allowlist`                |
+| Command stdout/stderr   | private       | `privacy.include_full_logs`            |
+| Environment variables   | private       | `redaction.environment_allowlist`      |
 | File contents           | not captured  | `file_policy.*`                        |
 | Git diff                | not captured  | `file_policy.include_git_diff`         |
 | Declared inputs/outputs | private       | `privacy.public_by_default`            |
@@ -15,17 +15,17 @@
 ## Redaction Rules (SPEC §13.2)
 
 - **Before persistence:** sensitive fields are redacted from event payloads before they are written to the journal (redact-before-append).
-- **Allowlist env capture:** only environment variable names on `privacy.env_allowlist` are captured; others are dropped.
-- **Denylist names:** any payload key matching `privacy.redact_fields` is replaced with `"[REDACTED]"`.
-- **Regex patterns:** values matching `redaction.patterns_file` regexes are replaced inline.
+- **Allowlist env capture:** only environment variable names on `redaction.environment_allowlist` are captured; others are dropped.
+- **Secret values:** values matching the built-in secret regexes (and `KEY=value` assignments whose key contains TOKEN/SECRET/PASSWORD/etc.) are replaced with `[REDACTED:secret]`.
+- **Regex patterns:** values matching the built-in secret regexes plus any extra regexes from `redaction.patterns_file` are replaced inline with `[REDACTED:secret]`.
 - **Never read:** `.env` files, OS keychains, SSH keys (`~/.ssh/`), cloud credential files (`~/.aws/`, `~/.gcp/`, `~/.azure/`) are never captured regardless of config.
 
 ## Redaction Journal
 
 When redaction is applied with `rcr redact --apply`:
-- The original journal is preserved as `events.ndjson.pre-redact`.
-- Redacted events are replaced with tombstone events carrying `event_type: "run.redaction.completed"`.
-- The replacement journal must pass Level-0 integrity check before the original is overwritten.
+- The original journal is preserved as a timestamped backup (`events.ndjson.pre-redaction-<timestamp>`).
+- Events are rewritten in place: matched values are replaced, changed events are marked `redacted: true`, and the whole hash chain is recomputed.
+- A `redaction.applied` event is appended recording the finding count and the path of the redacted-journal report.
 
 ## Public Export Gate (SPEC §13.4)
 
@@ -33,7 +33,7 @@ The `finalize --public` command runs Level-5 validation AFTER staging all files 
 
 1. Any staged event payload or file contains a secret-pattern match.
 2. A denylist filename is present in the staged tree.
-3. An environment variable not on the allowlist appears in the journal.
+3. A `commands/*.json` sidecar records an environment variable not on `redaction.environment_allowlist`.
 4. Any `redacted: true` event is included without the redaction having been applied.
 5. `privacy.require_privacy_gate` is true and the gate check was not run.
 

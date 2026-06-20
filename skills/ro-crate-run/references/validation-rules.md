@@ -22,7 +22,7 @@
 
 - `state.run_id` must match all events' `run_id`.
 - `state.sequence` must equal the number of events in the journal.
-- `id-map.json` entities must all appear in the current crate graph.
+- `id-map.json` must be valid JSON and its `event_to_entity`/`path_to_entity`/`step_to_entity` sections must each be an object.
 
 ## Level 2 — RO-Crate Structure
 
@@ -46,17 +46,17 @@
 
 ## Strict Mode Additions
 
-With `--strict`: Level-4 warnings become errors; missing `FormalParameter` for declared parameters is an error.
+With `--strict`: policy-gated reproducibility findings (those whose code ends in `_required`) become errors, a Process Run Crate with zero actions becomes an error, and a SHACL shapes check runs (when the `pyshacl` extra is installed).
 
 ## Finding Codes
 
-- `E001` — broken hash chain
-- `E002` — unterminated command
-- `W001` — missing software version
-- `W002` — non-deterministic output
-- `E003` — missing required crate entity
-- `E004` — profile rule violation
-- `E005` — public-export privacy leak
+- `hash_chain_mismatch` / `event_hash_mismatch` — broken hash chain (Level 0)
+- `unterminated_command` — command with no terminal event (Level 0)
+- `missing_software_versions` — no tool versions declared (Level 4, warning)
+- `missing_environment_summary` — no environment observed (Level 4, warning)
+- `referenced_file_missing` / `metadata_missing` — missing required crate entity (Level 2)
+- `action_missing_instrument` / `workflow_missing_entity` — profile rule violation (Level 3)
+- `secret_pattern` / `env_var_outside_allowlist` — public-export privacy leak (Level 5)
 
 ## Public Release Gate Conditions (Level 5)
 
@@ -64,4 +64,4 @@ Fails closed (blocks export) when:
 - Any event payload contains a secret regex match (token, password, key).
 - A captured file path matches a denylist pattern (`.env`, `*.pem`, `id_rsa`, etc.).
 - The embedded event journal contains a redacted-but-not-purged secret.
-- Any environment variable in the `environment.observed` event is not on the allowlist.
+- A `commands/*.json` sidecar records an environment variable not on `redaction.environment_allowlist`.

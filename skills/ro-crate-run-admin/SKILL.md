@@ -17,7 +17,7 @@ ${CLAUDE_SKILL_DIR}/scripts/rcr $ARGUMENTS
 
 Supported admin operations:
 
-- `rcr redact --apply` — rewrite the event journal with redactions applied (preserves a pre-redaction copy and tombstone events).
+- `rcr redact --apply` — rewrite the event journal with redactions applied (preserves a pre-redaction copy of the journal).
 - `rcr finalize --public` — run the public privacy gate and produce a release package; fails closed on any leak.
 - `rcr sign` — sign the finalized crate manifest with the project Ed25519 key.
 
