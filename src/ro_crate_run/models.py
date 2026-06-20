@@ -1,3 +1,10 @@
+"""Hand-(de)serialized config, state, event, and projection dataclasses.
+
+These dataclasses are the in-memory shapes for ``config.json``, ``state.json``,
+journal events, and the reduced ``RunModel`` consumed by crate assembly. They are
+serialized and parsed by hand in ``state.py`` rather than via a schema library.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -247,6 +254,8 @@ class RunModel:
     requested_profile: str
     profile_uri: str
     mode: str
+    profile_confidence: Optional[str] = None
+    profile_evidence: list[str] = field(default_factory=list)
     inputs: list[JsonDict] = field(default_factory=list)
     outputs: list[JsonDict] = field(default_factory=list)
     parameters: list[JsonDict] = field(default_factory=list)
@@ -260,13 +269,13 @@ class RunModel:
     events: list[RcrEvent] = field(default_factory=list)
     aborted: bool = False
     results: list[JsonDict] = field(default_factory=list)
-    # Phase 4 fields: projected from environment.observed / container.observed / dependency.lockfile.observed
+    # Provenance context projected from environment.observed / container.observed / dependency.lockfile.observed.
     git: JsonDict = field(default_factory=dict)
     environment: JsonDict = field(default_factory=dict)
     containers: list[JsonDict] = field(default_factory=list)
     dependencies: list[JsonDict] = field(default_factory=list)
-    # Agent-action families: the Claude Code agent's own actions are the workflow (SPEC §16).
-    # Each is projected from journal events the reducer previously dropped.
+    # The Claude Code agent's own actions are treated as the workflow.
+    # Each list is projected from the corresponding journal events.
     file_actions: list[JsonDict] = field(default_factory=list)      # file.created/modified/changed/deleted
     raw_commands: list[JsonDict] = field(default_factory=list)      # substantive raw Bash (tool.completed)
     subagents: list[JsonDict] = field(default_factory=list)         # agent.task.* / agent.subagent.*
@@ -281,6 +290,7 @@ class RunModel:
 
 
 def strip_none(value: Any) -> Any:
+    """Recursively drop dict keys and list elements whose value is None, for crate JSON-LD assembly."""
     if isinstance(value, dict):
         return {k: strip_none(v) for k, v in value.items() if v is not None}
     if isinstance(value, list):

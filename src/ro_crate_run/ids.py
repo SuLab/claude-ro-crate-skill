@@ -1,3 +1,6 @@
+"""Stable crate `@id` construction: slugged entity ids, project-relative
+file ids, and the canonical id-map skeleton persisted as id-map.json."""
+
 from __future__ import annotations
 
 import json
@@ -5,6 +8,44 @@ import re
 import uuid
 from pathlib import Path
 from typing import Any
+
+ID_MAP_SCHEMA_VERSION = "1.0.0"
+
+
+def relative_file_id(path: Path, project_dir: Path) -> str:
+    """Return the crate `@id` for a file path.
+
+    An absolute path inside the project becomes a project-relative path; an
+    absolute path outside the project becomes a ``file://`` URI; a relative
+    path is returned unchanged.
+    """
+    if path.is_absolute():
+        try:
+            return str(path.resolve().relative_to(project_dir.resolve()))
+        except ValueError:
+            return path.as_uri()
+    return str(path)
+
+
+def file_ref(path: Path, project_dir: Path) -> dict[str, str]:
+    """Return a `{"@id": ...}` reference using :func:`relative_file_id`."""
+    return {"@id": relative_file_id(path, project_dir)}
+
+
+def new_id_map() -> dict[str, Any]:
+    """Return a fresh id-map skeleton with every persisted key set empty.
+
+    The skeleton is the union of every id-map seeder in the package, so all
+    consumers project from one canonical shape.
+    """
+    return {
+        "schema_version": ID_MAP_SCHEMA_VERSION,
+        "event_to_entity": {},
+        "path_to_entity": {},
+        "step_to_entity": {},
+        "profile_to_entity": {},
+        "software_to_entity": {},
+    }
 
 
 def slugify(value: str) -> str:

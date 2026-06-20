@@ -1,29 +1,52 @@
+"""Secret-redaction engine.
+
+Detects and masks credentials in text, structured payloads, and captured
+environment variables before any data is persisted to the event journal or a
+crate. A `Redactor` carries a table of compiled credential patterns (built-in
+plus optional user-supplied ones) and an environment-variable allowlist.
+
+This module is also the single home for the on-disk secret-scan helpers
+(`scan_file_for_secrets`, `scan_tree`): they read each file losslessly as
+latin-1 so an ASCII secret embedded in an otherwise-binary blob is still
+caught, and skip a file only when it cannot be read at all (OSError).
+"""
+
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from .models import RedactionResult
+from .models import RcrConfig, RedactionResult
 
-if TYPE_CHECKING:
-    from .models import RcrConfig
+REDACTION_TOKEN = "[REDACTED:secret]"
 
 
 class Redactor:
     def __init__(self, environment_allowlist: list[str] | None = None) -> None:
         self.environment_allowlist = set(environment_allowlist or [])
-        self.patterns = [
-            re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-            re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
-            re.compile(r"A[KS]IA[0-9A-Z]{16}"),
-            re.compile(r"xox[abp]-[A-Za-z0-9-]{10,}"),
-            re.compile(r"AIza[0-9A-Za-z_-]{35}"),
-            re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
-            re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{20,}"),
-            re.compile(
-                r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S
+        # Built-in credential patterns, each tagged with a category name so a
+        # RedactionResult can report which kind(s) of secret were masked.
+        self.patterns: list[tuple[str, re.Pattern[str]]] = [
+            ("openai-key", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
+            ("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")),
+            ("aws-key", re.compile(r"A[KS]IA[0-9A-Z]{16}")),
+            ("slack-token", re.compile(r"xox[abp]-[A-Za-z0-9-]{10,}")),
+            ("google-api-key", re.compile(r"AIza[0-9A-Za-z_-]{35}")),
+            (
+                "jwt",
+                re.compile(
+                    r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+                ),
+            ),
+            ("bearer", re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{20,}")),
+            (
+                "private-key",
+                re.compile(
+                    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+                    re.S,
+                ),
             ),
         ]
         self.key_pattern = re.compile(
@@ -31,25 +54,33 @@ class Redactor:
         )
 
     @classmethod
-    def load_patterns(cls, path: Path) -> list[re.Pattern[str]]:
+    def load_patterns(cls, path: Path) -> list[tuple[str, re.Pattern[str]]]:
+        """Compile user-supplied patterns from a JSON policy file.
+
+        Returns ``(category, pattern)`` pairs tagged with the ``custom``
+        category. Malformed or unreadable files, and individual regexes that
+        fail to compile, contribute nothing.
+        """
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
         raw = data.get("patterns", []) if isinstance(data, dict) else []
-        compiled: list[re.Pattern[str]] = []
+        compiled: list[tuple[str, re.Pattern[str]]] = []
         for item in raw:
             try:
-                compiled.append(re.compile(str(item)))
+                compiled.append(("custom", re.compile(str(item))))
             except re.error:
                 continue
         return compiled
 
-    @classmethod
-    def from_policy(cls, path: Path) -> Redactor:
-        redactor = cls.default()
-        redactor.patterns = [*redactor.patterns, *cls.load_patterns(path)]
-        return redactor
+    def add_patterns_from(self, path: Path) -> None:
+        """Append user-supplied credential patterns from a JSON policy file.
+
+        Each loaded pattern is tagged with the ``custom`` category (see
+        `load_patterns`); malformed or unreadable files contribute nothing.
+        """
+        self.patterns = [*self.patterns, *self.load_patterns(path)]
 
     @classmethod
     def from_config(cls, cfg: RcrConfig, state_dir: Path | None = None) -> Redactor:
@@ -63,8 +94,20 @@ class Redactor:
             candidate = Path(patterns_file)
             if not candidate.is_absolute() and state_dir is not None:
                 candidate = state_dir.parent / patterns_file
-            redactor.patterns = [*redactor.patterns, *cls.load_patterns(candidate)]
+            redactor.add_patterns_from(candidate)
         return redactor
+
+    @classmethod
+    def for_state_dir(cls, state_dir: Path) -> Redactor:
+        """Build the redactor configured for a project state directory.
+
+        Loads ``config.json`` from ``state_dir`` and resolves any relative
+        custom-patterns file against it, so callers cannot accidentally
+        mis-resolve patterns to the current working directory.
+        """
+        from .state import load_config
+
+        return cls.from_config(load_config(state_dir), state_dir=state_dir)
 
     @classmethod
     def default(cls, environment_allowlist: list[str] | None = None) -> Redactor:
@@ -80,17 +123,17 @@ class Redactor:
         if self.key_pattern.search(redacted):
             redacted = re.sub(
                 r"(?i)([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|CREDENTIAL|PRIVATE_KEY|API_KEY|ACCESS_KEY|REFRESH_TOKEN)[A-Z0-9_]*\s*=\s*)\S+",
-                r"\1[REDACTED:secret]",
+                r"\1" + REDACTION_TOKEN,
                 redacted,
             )
             if redacted != text:
                 applied += 1
-                categories.append("secret")
-        for pattern in self.patterns:
-            redacted, count = pattern.subn("[REDACTED:secret]", redacted)
+                categories.append("secret-assignment")
+        for name, pattern in self.patterns:
+            redacted, count = pattern.subn(REDACTION_TOKEN, redacted)
             if count:
                 applied += count
-                categories.append("secret")
+                categories.append(name)
         return RedactionResult(redacted, applied, tuple(sorted(set(categories))))
 
     def capture_environment(self, env: dict[str, str]) -> dict[str, str]:
@@ -124,9 +167,56 @@ class Redactor:
         return value, 0
 
 
-def redaction_event_payload(context: str, result: RedactionResult) -> dict[str, Any]:
+def scan_file_for_secrets(path: Path, redactor: Redactor) -> list[str]:
+    """Return the matched secret-category names for a single file.
+
+    The file is decoded as latin-1 (a lossless byte->char mapping) rather than
+    UTF-8: an ASCII secret embedded in an otherwise-binary blob must still be
+    caught instead of skipped. Only a file that cannot be read at all (OSError)
+    is skipped, yielding an empty list.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    text = raw.decode("latin-1")
+    return list(redactor.redact_text(text).categories)
+
+
+def scan_tree(root: Path, redactor: Redactor) -> list[tuple[Path, list[str]]]:
+    """Scan every regular file under ``root`` for secrets.
+
+    Returns one ``(path, categories)`` entry per file in which at least one
+    secret category matched, in sorted path order. Uses the same hardened
+    latin-1 / OSError-only policy as `scan_file_for_secrets`.
+    """
+    hits: list[tuple[Path, list[str]]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        categories = scan_file_for_secrets(path, redactor)
+        if categories:
+            hits.append((path, categories))
+    return hits
+
+
+def redaction_categories(*results: RedactionResult) -> list[str]:
+    """Union of category names across one or more redaction results, sorted."""
+    merged: set[str] = set()
+    for result in results:
+        merged.update(result.categories)
+    return sorted(merged)
+
+
+def redaction_event_payload(context: str, *results: RedactionResult) -> dict[str, Any]:
+    """Build a ``redaction.applied`` event payload from one or more results.
+
+    Sums the per-field redaction counts and merges their categories so a field
+    redacted across multiple text streams (e.g. a note plus a rationale)
+    reports every matched category, not just the first.
+    """
     return {
         "context": context,
-        "applied": result.applied,
-        "categories": list(result.categories),
+        "applied": sum(result.applied for result in results),
+        "categories": redaction_categories(*results),
     }

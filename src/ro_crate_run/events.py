@@ -1,3 +1,14 @@
+"""Event construction, the canonical JSON encoder, and the shared actor roster.
+
+This module owns the single deterministic JSON encoding used both for the
+event hash chain and for on-disk journal lines (``canonical_json`` /
+``dump_event_line``), the ``new_event`` factory, and the one source of truth
+for actor identities. The roster (``ACTOR_NAMES`` / ``ACTOR_TYPES``) is keyed
+by role; helpers derive the two parallel id namespaces from it -- event-level
+``actor:<role>`` ids that ride on journal events, and crate-level
+``#actor/<role>`` ids emitted into the RO-Crate graph -- so the display names
+and ``@type`` values are maintained in exactly one place.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -10,26 +21,67 @@ from . import __version__
 from .models import Actor, EventSource, RcrEvent
 from .time import utc_now
 
-_ACTOR_BY_SOURCE: dict[str, tuple[str, str, str]] = {
-    "human_cli": ("Person", "actor:human", "Human operator"),
-    "claude_hook": ("SoftwareApplication", "actor:claude-code", "Claude Code"),
-    "skill_command": ("SoftwareApplication", "actor:rcr", "RO-Crate Run"),
-    "materializer": ("SoftwareApplication", "actor:rcr", "RO-Crate Run"),
-    "validator": ("SoftwareApplication", "actor:rcr", "RO-Crate Run"),
-    "ci": ("System", "actor:ci", "CI"),
+# Display names and @type for each actor role. These are the single source of
+# truth for both the event-level (actor:<role>) and crate-level (#actor/<role>)
+# casts, which historically duplicated these literals across modules.
+ACTOR_NAMES: dict[str, str] = {
+    "human": "Human operator",
+    "rcr": "RO-Crate Run",
+    "claude-code": "Claude Code",
+    "ci": "CI",
 }
+ACTOR_TYPES: dict[str, str] = {
+    "human": "Person",
+    "rcr": "SoftwareApplication",
+    "claude-code": "SoftwareApplication",
+    "ci": "System",
+}
+
+# Map an event source_kind to the actor role it acts as. Unknown sources fall
+# back to the rcr (tooling) role.
+_ROLE_BY_SOURCE: dict[str, str] = {
+    "human_cli": "human",
+    "claude_hook": "claude-code",
+    "skill_command": "rcr",
+    "materializer": "rcr",
+    "validator": "rcr",
+    "ci": "ci",
+}
+_DEFAULT_ROLE = "rcr"
+
+
+def event_actor_id(role: str) -> str:
+    """Event-level actor id (colon namespace) carried on journal events."""
+    return f"actor:{role}"
+
+
+def crate_actor_id(role: str) -> str:
+    """Crate-level actor id (slash namespace) emitted into the RO-Crate graph."""
+    return f"#actor/{role}"
+
+
+def engine_actor_id(engine: str) -> str:
+    """Crate-level actor id for a workflow engine SoftwareApplication."""
+    return f"#actor/engine/{engine}"
+
+
+def actor_for_role(role: str) -> dict[str, str]:
+    """Return the crate-level actor JSON-LD node for a role, derived from the roster."""
+    return {
+        "@id": event_actor_id(role),
+        "@type": ACTOR_TYPES[role],
+        "name": ACTOR_NAMES[role],
+    }
 
 
 def actor_for_source(source_kind: str, source_name: str) -> Actor:
     """Return the Actor for a given source_kind (source_name is accepted but ignored)."""
-    kind, actor_id, name = _ACTOR_BY_SOURCE.get(
-        source_kind, ("SoftwareApplication", "actor:rcr", "RO-Crate Run")
-    )
-    return Actor(type=kind, id=actor_id, name=name)
+    role = _ROLE_BY_SOURCE.get(source_kind, _DEFAULT_ROLE)
+    return Actor(type=ACTOR_TYPES[role], id=event_actor_id(role), name=ACTOR_NAMES[role])
 
 
 def canonical_json(value: Any) -> str:
-    """Deterministic JSON encoding used for the event hash chain.
+    """Deterministic JSON encoding used for hashing and on-disk event lines.
 
     Scheme (a defined, tested equivalent to RFC 8785 per SPEC §11.5):
     UTF-8 output (ensure_ascii=False), object keys sorted, no insignificant
@@ -40,6 +92,16 @@ def canonical_json(value: Any) -> str:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     )
+
+
+def dump_event_line(data: dict[str, Any]) -> str:
+    """Encode one event as its canonical newline-terminated on-disk journal line.
+
+    The single canonical NDJSON encoder: it is exactly ``canonical_json`` (the
+    same form that is hashed) plus a trailing newline, so the stored line and
+    the hashed bytes never diverge.
+    """
+    return canonical_json(data) + "\n"
 
 
 def compute_event_hash(event: dict[str, Any]) -> str:
@@ -122,6 +184,12 @@ def event_from_dict(data: dict[str, Any]) -> RcrEvent:
 
 
 def _reject_null(value: Any) -> None:
+    """Recursively raise ValueError if any JSON null appears in an event payload.
+
+    Absent fields must be omitted, not encoded as null. This is the deliberate
+    opposite of ``models.strip_none`` (which drops None during crate assembly);
+    the two policies are intentionally not unified.
+    """
     if value is None:
         raise ValueError("JSON null is not allowed in event payloads")
     if isinstance(value, dict):
