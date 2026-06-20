@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import secrets
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar, Union, cast, get_args, get_origin
 
 from . import ids
 from .constants import resolve_profile
+from .fs import write_json
 from .models import JsonDict, RcrConfig, RcrState
 from .time import utc_now, utc_now_compact
 
@@ -43,7 +44,6 @@ def initial_state(title: str, config: RcrConfig, now: str | None = None) -> RcrS
         selected_profile=selected,
         requested_profile=config.default_profile,
         profile_uri=profile_uri,
-        privacy=config.privacy,
     )
 
 
@@ -81,7 +81,18 @@ def update_state(state_dir: Path, mutate: Callable[[RcrState], None]) -> RcrStat
 
 def write_id_map(state_dir: Path, id_map: dict[str, Any] | None = None) -> None:
     id_map = id_map or ids.new_id_map()
-    (state_dir / "id-map.json").write_text(json.dumps(id_map, indent=2, sort_keys=True) + "\n")
+    write_json(state_dir / "id-map.json", id_map)
+
+
+def _iter_journal_lines(path: Path) -> Iterator[tuple[int, str]]:
+    """Yield ``(1-based index, line)`` for every non-blank journal line.
+
+    The single low-level scan the strict and safe readers share, so the
+    blank-skip rule and ``utf-8`` decoding live in exactly one place.
+    """
+    for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if line.strip():
+            yield idx, line
 
 
 def read_events(state_dir: Path) -> list[dict[str, Any]]:
@@ -93,7 +104,7 @@ def read_events(state_dir: Path) -> list[dict[str, Any]]:
     path = state_dir / "events.ndjson"
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for _, line in _iter_journal_lines(path)]
 
 
 def read_events_safe(state_dir: Path) -> tuple[list[dict[str, Any]], str | None]:
@@ -106,9 +117,7 @@ def read_events_safe(state_dir: Path) -> tuple[list[dict[str, Any]], str | None]
     if not path.exists():
         return [], None
     events: list[dict[str, Any]] = []
-    for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
+    for idx, line in _iter_journal_lines(path):
         try:
             events.append(json.loads(line))
         except json.JSONDecodeError as exc:

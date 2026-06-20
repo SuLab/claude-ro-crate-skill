@@ -1,8 +1,10 @@
 """Append-only event journal.
 
-Every write goes through :meth:`EventWriter.append`, which takes the file lock,
-links the hash chain, bumps ``state.sequence``, fsyncs, and best-effort mirrors
-to a remote journal. ``events.ndjson`` is never written by any other path.
+Single-event writes go through :meth:`EventWriter.append`, which takes the file
+lock, links the hash chain, bumps ``state.sequence``, fsyncs, and best-effort
+mirrors to a remote journal. The only other writer is
+:meth:`EventWriter.rewrite_chain`, which the ``rcr redact`` command uses to
+re-link and atomically rewrite the whole journal under the same lock.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from .events import (
     new_event,
 )
 from .models import Actor, RcrEvent
-from .state import load_state, write_state
+from .state import load_config, load_state, write_state
 from .time import utc_now
 
 
@@ -74,7 +76,7 @@ class EventWriter:
             payload, policy_redacted = self._redact_payload(payload)
             sequence = state.sequence + 1
             # Resolve actor: explicit override > event-type special case > source-derived
-            resolved_actor = actor or actor_for_source(source_kind, source_name)
+            resolved_actor = actor or actor_for_source(source_kind)
             if event_type == "human.prompt":
                 # human.prompt is emitted from a Claude hook, so the source-derived
                 # actor would be the agent; the prompt is authored by the human, so
@@ -118,7 +120,6 @@ class EventWriter:
             # set, a mirror failure is raised to the caller instead of silently swallowed
             # (the local event is already committed, but the operator is alerted).
             from .remote_journal import mirror_event
-            from .state import load_config
 
             _rj = load_config(self.state_dir).remote_journal
             try:
@@ -141,6 +142,67 @@ class EventWriter:
             # bookkeeping cannot make a stale crate look fresh.
             write_state(self.state_dir, state)
             return event
+
+    def rewrite_chain(self, events: list[RcrEvent]) -> None:
+        """Re-link and atomically rewrite the entire journal — the sole owner of a
+        full-chain rewrite (used by the ``rcr redact`` command to persist edited events).
+
+        The caller supplies events whose ``sequence`` and contents are already final;
+        this method re-derives the hash chain (so any edited payload still yields a
+        valid chain), persists it crash-safely, refreshes the derived state, and
+        re-mirrors the rewritten lines. Held under the append ``FileLock`` so it stays
+        exclusive with appends and recovery — the same lock those paths take.
+
+        Empty input is a no-op: there is nothing to rewrite and no state to bump.
+        """
+        if not events:
+            return
+        with FileLock(str(self.lock_path)):
+            previous: str | None = None
+            lines: list[str] = []
+            for event in events:
+                event.previous_event_hash = previous
+                event.event_hash = None
+                data = event_to_dict(event)
+                data["event_hash"] = compute_event_hash(data)
+                event.event_hash = data["event_hash"]
+                previous = event.event_hash
+                lines.append(dump_event_line(data))
+            payload = "".join(lines)
+            # Atomic rewrite (tmp + replace) so a crash mid-write cannot truncate or
+            # corrupt the authoritative journal.
+            journal = self.state_dir / "events.ndjson"
+            journal_tmp = journal.with_suffix(".ndjson.tmp")
+            journal_tmp.write_text(payload, encoding="utf-8")
+            journal_tmp.replace(journal)
+            # Re-mirror the rewritten chain, reusing append's post-write fail-closed
+            # policy: the local journal is authoritative and already committed, so a
+            # mirror failure only raises when remote_journal.fail_closed is set.
+            from .remote_journal import mirror_event
+
+            _rj = load_config(self.state_dir).remote_journal
+            try:
+                # Attempt every line (no short-circuit) so the remote receives the
+                # full rewritten chain whenever it is reachable.
+                _mirror_ok = all([mirror_event(_rj, line) for line in lines])
+            except Exception:  # pragma: no cover - network/transport failure
+                _mirror_ok = False
+            if not _mirror_ok and _rj.fail_closed and _rj.enabled:
+                raise RuntimeError(
+                    "remote journal mirror failed and remote_journal.fail_closed is set"
+                )
+            final = events[-1]
+            state = load_state(self.state_dir)
+            state.sequence = final.sequence
+            state.last_event_hash = final.event_hash
+            state.updated_at = utc_now()
+            effect = dirty_effect(final.event_type)
+            if effect == "set":
+                state.dirty = True
+            elif effect == "clear":
+                state.dirty = False
+            # "preserve" leaves the prior dirty state untouched, matching append.
+            write_state(self.state_dir, state)
 
     def _redact_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         try:

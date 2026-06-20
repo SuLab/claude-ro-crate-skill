@@ -11,7 +11,14 @@ from ro_crate_run.constants import DEPENDENCY_MANIFESTS
 from ro_crate_run.models import ValidationFinding
 
 from .context import ValidationContext
-from .graphview import is_action
+from .graphview import as_list, is_action
+
+
+def _warning(code: str, message: str, path: str = "") -> ValidationFinding:
+    """Construct an unconditional L4 (``reproducibility``) warning. Severity is
+    stated here so the level/severity pair lives in one place for this checker;
+    policy-escalated findings go through the local ``warn`` closure instead."""
+    return ValidationFinding("reproducibility", code, message, path, severity="warning")
 
 
 def _env_observed(ctx: ValidationContext) -> dict[str, Any]:
@@ -30,10 +37,17 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
     vcfg = ctx.cfg.validation
 
     def warn(code: str, message: str, *, required: bool) -> None:
+        # Severity is stated directly: a policy-required gap is an error, otherwise a
+        # warning. The ``_required`` suffix is retained only as a stable machine code
+        # (the recommendations lookup strips it to reuse the base recommendation).
         if required:
-            findings.append(ValidationFinding("reproducibility", f"{code}_required", f"{message} (required by policy)"))
+            findings.append(ValidationFinding(
+                "reproducibility", f"{code}_required", f"{message} (required by policy)", severity="error",
+            ))
         else:
-            findings.append(ValidationFinding("reproducibility", code, message))
+            findings.append(ValidationFinding(
+                "reproducibility", code, message, severity="warning",
+            ))
 
     # Missing git commit
     if not git.get("commit"):
@@ -52,28 +66,28 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
     for declared in ctx.state.declared_inputs:
         path = str(declared.get("path", ""))
         if declared.get("existence", "").startswith("observed") and not declared.get("sha256"):
-            findings.append(ValidationFinding("reproducibility", "missing_input_hash", f"Local input not hashed: {path}", path=path))
+            findings.append(_warning("missing_input_hash", f"Local input not hashed: {path}", path))
     # Missing declared outputs
     if not ctx.state.declared_outputs:
         warn("no_declared_outputs", "No outputs declared", required=vcfg.require_declared_outputs and ctx.strict)
     # Missing environment summary
     if not env.get("os") and not env.get("python"):
-        findings.append(ValidationFinding("reproducibility", "missing_environment_summary", "No environment summary observed"))
+        findings.append(_warning("missing_environment_summary", "No environment summary observed"))
     # Missing container digest for containerized run
     containers = [e for e in ctx.events if e.get("event_type") == "container.observed"]
     for c in containers:
         payload = c.get("payload", {})
         if isinstance(payload, dict) and not payload.get("digest"):
-            findings.append(ValidationFinding("reproducibility", "missing_container_digest", "Container observed without digest"))
+            findings.append(_warning("missing_container_digest", "Container observed without digest"))
     # Missing lockfiles for dependency-managed projects
     has_lockfile_event = any(e.get("event_type") == "dependency.lockfile.observed" for e in ctx.events)
     if not has_lockfile_event and any((project_dir / name).exists() for name in DEPENDENCY_MANIFESTS):
-        findings.append(ValidationFinding("reproducibility", "missing_lockfiles", "Dependency lockfiles present but not recorded"))
+        findings.append(_warning("missing_lockfiles", "Dependency lockfiles present but not recorded"))
     # Missing human rationale for manual parameter changes
     param_events = [e for e in ctx.events if e.get("event_type") == "workflow.parameter.declared"]
     decision_events = [e for e in ctx.events if e.get("event_type") == "human.decision"]
     if param_events and not decision_events:
-        findings.append(ValidationFinding("reproducibility", "missing_parameter_rationale", "Parameters declared without any human rationale"))
+        findings.append(_warning("missing_parameter_rationale", "Parameters declared without any human rationale"))
     # Declared output with no producing Action (lineage gap). An output the agent
     # wrote (file.* -> CreateAction) or produced via `rcr run --outputs` links here;
     # a separately-declared output with no producer is flagged so the gap is visible.
@@ -82,9 +96,7 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
         for entity in ctx.metadata.get("@graph", []):
             if not is_action(entity):
                 continue
-            result = entity.get("result") or []
-            result = result if isinstance(result, list) else [result]
-            for ref in result:
+            for ref in as_list(entity.get("result") or []):
                 if isinstance(ref, dict) and ref.get("@id"):
                     produced.add(str(ref["@id"]))
         for declared in ctx.state.declared_outputs:
@@ -94,9 +106,9 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
                 and path not in produced
                 and str(declared.get("existence", "")) in {"generated", "observed local"}
             ):
-                findings.append(ValidationFinding(
-                    "reproducibility", "output_without_producer",
-                    f"Declared output has no producing action (lineage gap): {path}", path=path,
+                findings.append(_warning(
+                    "output_without_producer",
+                    f"Declared output has no producing action (lineage gap): {path}", path,
                 ))
     # Stale crate: provenance events exist after the last checkpoint.
     if ctx.state.dirty:

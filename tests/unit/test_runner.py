@@ -157,3 +157,39 @@ def test_run_records_signal_failure_class(tmp_path: Path, monkeypatch) -> None:
     )
     assert sidecar["signal"] == 15
     assert sidecar["failure_class"] == "signal"
+
+
+def test_redaction_applied_event_carries_real_categories(tmp_path: Path, monkeypatch) -> None:
+    # The runner now builds redaction.applied via redaction_event_payload, so the event must
+    # report the real matched categories from the (redacted) argv instead of the old hardcoded
+    # categories: [].
+    _start(tmp_path, monkeypatch)
+    secret = "sk-" + "A" * 24  # matches the openai-key pattern
+    rc = CommandRunner(tmp_path / ".ro-crate-run", tmp_path).run(["echo", secret])
+    assert rc == 0
+    events = read_events(tmp_path / ".ro-crate-run")
+    applied = [e for e in events if e["event_type"] == "redaction.applied"]
+    assert applied, "no redaction.applied event emitted for a command with a secret in argv"
+    assert "openai-key" in applied[-1]["payload"]["categories"]
+
+
+def test_pump_survives_non_utf8_child_output(tmp_path: Path, monkeypatch) -> None:
+    # A child emitting invalid-UTF-8 bytes must not kill the reader thread: with errors="replace"
+    # the stream decodes lossily, the log is written, and the command is journaled as completed
+    # (not silently truncated/abandoned with a dead pump).
+    _start(tmp_path, monkeypatch)
+    rc = CommandRunner(tmp_path / ".ro-crate-run", tmp_path).run(
+        ["python3", "-c", "import sys; sys.stdout.buffer.write(b'before\\xff\\xfeafter\\n')"]
+    )
+    assert rc == 0
+    events = read_events(tmp_path / ".ro-crate-run")
+    assert events[-1]["event_type"] in (
+        "redaction.applied",
+        "execution.command.completed",
+    )
+    cmd = [e for e in events if e["event_type"] == "execution.command.completed"]
+    assert cmd, "command was not journaled as completed despite non-UTF-8 output"
+    assert "log_write_errors" not in cmd[-1]["payload"], "decode killed the pump thread"
+    log = next((tmp_path / ".ro-crate-run" / "logs").glob("cmd_*.stdout.txt")).read_text()
+    assert "before" in log and "after" in log
+    assert "�" in log  # the replacement char for the invalid bytes

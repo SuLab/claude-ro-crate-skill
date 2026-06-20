@@ -18,12 +18,12 @@ from dataclasses import asdict
 from typing import Any
 
 from . import __version__
+from .constants import EVENT_SCHEMA_VERSION
 from .models import Actor, EventSource, RcrEvent
 from .time import utc_now
 
-# Display names and @type for each actor role. These are the single source of
-# truth for both the event-level (actor:<role>) and crate-level (#actor/<role>)
-# casts, which historically duplicated these literals across modules.
+# Display names and @type for each actor role. Single source of truth for both
+# the event-level (actor:<role>) and crate-level (#actor/<role>) id namespaces.
 ACTOR_NAMES: dict[str, str] = {
     "human": "Human operator",
     "rcr": "RO-Crate Run",
@@ -65,19 +65,32 @@ def engine_actor_id(engine: str) -> str:
     return f"#actor/engine/{engine}"
 
 
-def actor_for_role(role: str) -> dict[str, str]:
-    """Return the crate-level actor JSON-LD node for a role, derived from the roster."""
-    return {
-        "@id": event_actor_id(role),
-        "@type": ACTOR_TYPES[role],
-        "name": ACTOR_NAMES[role],
-    }
+def actor_for_source(source_kind: str) -> Actor:
+    """Return the event-level Actor for a source_kind, derived from the roster.
 
-
-def actor_for_source(source_kind: str, source_name: str) -> Actor:
-    """Return the Actor for a given source_kind (source_name is accepted but ignored)."""
+    Unknown source kinds fall back to the rcr (tooling) role.
+    """
     role = _ROLE_BY_SOURCE.get(source_kind, _DEFAULT_ROLE)
     return Actor(type=ACTOR_TYPES[role], id=event_actor_id(role), name=ACTOR_NAMES[role])
+
+
+def verify_hash_chain(raw_events: list[dict[str, Any]]) -> str | None:
+    """Walk the event hash chain; return the first broken-link message, else None.
+
+    Each event's ``previous_event_hash`` must equal the prior event's
+    ``event_hash`` (``None`` before the first), and its ``event_hash`` must equal
+    ``compute_event_hash`` of the event. Returns the message for the first broken
+    link (previous-hash mismatch checked before event-hash mismatch), or ``None``
+    when the chain is intact or empty.
+    """
+    previous: str | None = None
+    for item in raw_events:
+        if item.get("previous_event_hash") != previous:
+            return "hash chain previous hash mismatch"
+        if item.get("event_hash") != compute_event_hash(item):
+            return "hash chain event hash mismatch"
+        previous = item.get("event_hash")
+    return None
 
 
 def canonical_json(value: Any) -> str:
@@ -131,11 +144,11 @@ def new_event(
     actor: Actor | None = None,
 ) -> RcrEvent:
     _reject_null(payload)
-    actor = actor or actor_for_source(source_kind, source_name)
+    actor = actor or actor_for_source(source_kind)
     return RcrEvent(
         event_id=f"evt_{uuid.uuid4().hex}",
         event_type=event_type,
-        schema_version="1.1.0",
+        schema_version=EVENT_SCHEMA_VERSION,
         run_id=run_id,
         session_id=session_id,
         sequence=sequence,
@@ -156,10 +169,18 @@ def new_event(
 
 
 def event_to_dict(event: RcrEvent) -> dict[str, Any]:
+    """Flatten an RcrEvent (and its nested Actor/EventSource) to the plain dict
+    used for hashing and on-disk journal lines."""
     return asdict(event)
 
 
 def event_from_dict(data: dict[str, Any]) -> RcrEvent:
+    """Reconstruct an RcrEvent from its journal dict form.
+
+    Rebuilds the nested Actor/EventSource dataclasses, coerces sequence/bool
+    fields, and tolerates absent optional fields (session_id, phase_id, step_id,
+    previous_event_hash, event_hash, payload).
+    """
     return RcrEvent(
         event_id=data["event_id"],
         event_type=data["event_type"],

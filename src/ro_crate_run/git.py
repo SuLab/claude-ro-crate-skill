@@ -6,20 +6,40 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+# Bound every git invocation: ``_git`` runs at the top of essentially every CLI
+# command and hook startup, so a git hung on an unreachable remote, a credential
+# prompt, or a contended index.lock must not block the whole process. A timeout
+# degrades to the not-a-repo path like any other git failure.
+_GIT_TIMEOUT_SECONDS = 10
+
 
 def _git(args: list[str], cwd: Path) -> str | None:
     """Run ``git <args>`` in ``cwd`` and return its stripped stdout.
 
-    Returns ``None`` when git is unavailable or the command exits non-zero
-    (e.g. the directory is not a git repository).
+    Returns ``None`` when git is unavailable, times out, or the command exits
+    non-zero (e.g. the directory is not a git repository).
     """
     try:
         out = subprocess.run(
-            ["git", *args], cwd=str(cwd), text=True, capture_output=True, check=False
+            ["git", *args],
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_GIT_TIMEOUT_SECONDS,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout.strip() if out.returncode == 0 else None
+
+
+def git_toplevel(cwd: Path) -> str | None:
+    """Return the repository root (``git rev-parse --show-toplevel``) or ``None``.
+
+    Public accessor so callers locate the project root without reaching into the
+    private ``_git`` helper.
+    """
+    return _git(["rev-parse", "--show-toplevel"], cwd)
 
 
 def capture_diff(project_dir: Path) -> str | None:
@@ -32,7 +52,7 @@ def observe_git_state(project_dir: Path) -> dict[str, object]:
 
     Returns ``{"available": False}`` when ``project_dir`` is not inside a git repo.
     """
-    top = _git(["rev-parse", "--show-toplevel"], project_dir)
+    top = git_toplevel(project_dir)
     if not top:
         return {"available": False}
     porcelain = _git(["status", "--porcelain"], project_dir) or ""

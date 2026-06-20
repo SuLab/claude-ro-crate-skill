@@ -5,12 +5,12 @@ degrades gracefully to no findings."""
 
 from __future__ import annotations
 
-import json
+from rdflib import Graph
 
 from ro_crate_run.models import ValidationFinding
 
 from .context import ValidationContext
-from .jsonld import _inline_contexts
+from .jsonld import build_graph
 
 
 def check_shacl(ctx: ValidationContext) -> list[ValidationFinding]:
@@ -18,12 +18,15 @@ def check_shacl(ctx: ValidationContext) -> list[ValidationFinding]:
         return []
     try:
         import pyshacl
-        from rdflib import Graph
     except ImportError:
         return []  # graceful: shacl extra not installed
     try:
-        data = Graph()
-        data.parse(data=json.dumps(_inline_contexts(ctx.metadata)), format="json-ld")
+        # Build the data graph through the shared JSON-LD seam so context inlining
+        # and parsing live in one place; a parse failure here is reported as a
+        # SHACL error (the L2 ro_crate checker separately reports jsonld_expansion_failed).
+        data, build_error = build_graph(ctx.metadata)
+        if build_error is not None or data is None:
+            raise ValueError(build_error or "could not build data graph")
         # Only run SHACL when a shapes graph is available.
         # Calling pyshacl.validate(data, shacl_graph=None) validates data against
         # itself and always conforms — that is a false assurance, so we skip instead.
@@ -40,16 +43,14 @@ def check_shacl(ctx: ValidationContext) -> list[ValidationFinding]:
     return []
 
 
-def _load_shapes_graph() -> Graph | None:  # type: ignore[name-defined]  # noqa: F821
+def _load_shapes_graph() -> Graph | None:
     """Return the SHACL shapes graph if one is bundled with the package, else None."""
     from importlib import resources as _resources
 
     try:
-        from rdflib import Graph as _Graph
-
         shapes_ref = _resources.files("ro_crate_run.assets") / "ro-crate-shacl.ttl"
         shapes_text = shapes_ref.read_text(encoding="utf-8")
-        g = _Graph()
+        g = Graph()
         g.parse(data=shapes_text, format="turtle")
         return g
     except (FileNotFoundError, TypeError, AttributeError):

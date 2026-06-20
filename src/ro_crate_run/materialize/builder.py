@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,22 +17,24 @@ from rocrate.rocrate import ROCrate  # type: ignore[import-untyped]
 from ro_crate_run import __version__ as _rcr_version
 from ro_crate_run.constants import (
     DEFAULT_LICENSE,
-    PROFILE_URIS,
+    PROFILES,
     RO_CRATE_CONTEXT,
     RO_CRATE_SPEC_URI,
-    WORKFLOW_LIKE_PROFILES,
+    ROOT_DATASET_ID,
     WORKFLOW_RO_CRATE_URI,
     WORKFLOW_RUN_CONTEXT,
     is_web_id,
 )
+from ro_crate_run.events import crate_actor_id
 from ro_crate_run.ids import IdMap, relative_file_id
 from ro_crate_run.journal import EventWriter
-from ro_crate_run.models import LastCheckpoint, RunModel, strip_none
+from ro_crate_run.models import LastCheckpoint, RcrConfig, RunModel, strip_none
 from ro_crate_run.state import load_config, load_state, read_events, write_state
 from ro_crate_run.time import utc_now
 from ro_crate_run.validation.validator import validate_run
 
 from .files import FilePlan, log_should_copy, plan_file_inclusion
+from .mapping._helpers import property_value, ref, root_ref
 from .run_model import build_run_model
 
 
@@ -139,7 +140,7 @@ class _WriteCtx:
     graph: list[dict[str, Any]]
     root: dict[str, Any]
     model: RunModel
-    cfg: Any
+    cfg: RcrConfig
     crate_dir: Path
     project_dir: Path
     id_map: IdMap
@@ -153,45 +154,93 @@ class _WriteCtx:
 def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str] = None) -> None:
     """Project a RunModel into an RO-Crate 1.2 directory under <state_dir>/ro-crate.
 
-    Composes the mapping builders into a flattened @graph (descriptor, root, profiles,
-    actors, software, provenance context, files, workflow, steps, command actions, agent
-    actions, notes/decisions), copies any captured file bodies into the crate, links every
-    data entity from the root via hasPart, and writes ro-crate-metadata.json + run-summary.json.
+    Orchestrator: builds a _WriteCtx, then runs the section emitters in order — scaffold,
+    actors/software/provenance context, parameters, declared files, workflow + steps, command
+    actions, agent actions, notes/decisions, journal, tool decisions, README — and finally
+    backfills hasPart and writes ro-crate-metadata.json + run-summary.json. Emission order is
+    output-bearing (it decides _dedupe last-wins and hasPart/mentions membership), so the calls
+    below must stay in sequence and the hasPart backfill must run last.
     """
-    from ro_crate_run.materialize import mapping
-
     published_at = published_at or utc_now()
     cfg = load_config(state_dir)
     project_dir = state_dir.parent
     crate_dir = state_dir / "ro-crate"
     crate_dir.mkdir(parents=True, exist_ok=True)
-    id_map = IdMap(state_dir)
 
-    # --- Scaffold: descriptor, root, license, profile ---
-    graph: list[dict[str, Any]] = []
+    # hash_policy.hash_large_files overrides the size gate: hash files of ANY size.
+    max_hash_bytes = cfg.hash_policy.max_hash_bytes()
+    ctx = _WriteCtx(
+        graph=[],
+        root={},
+        model=model,
+        cfg=cfg,
+        crate_dir=crate_dir,
+        project_dir=project_dir,
+        id_map=IdMap(state_dir),
+        plans={},
+        formal_param_map={},
+        file_ids=set(),
+        max_hash_bytes=max_hash_bytes,
+        published_at=published_at,
+    )
+
+    _emit_scaffold(ctx)
+    _emit_context_entities(ctx)
+    _emit_parameters(ctx)
+    _emit_declared_files(ctx)
+    workflow_entities = _emit_workflow(ctx)
+    _emit_steps(ctx)
+    for command in model.commands:
+        _emit_command_file_entities(ctx, command)
+    _emit_agent_actions(ctx)
+    _weave_synthetic_workflow_steps(ctx, workflow_entities)
+    _emit_notes_and_connections(ctx)
+    _emit_event_journal(ctx, state_dir)
+    _emit_tool_decisions(ctx)
+    _emit_readme(ctx)
+
+    # Every File/Dataset data entity must be reachable from root hasPart (RO-Crate 1.2 MUST);
+    # run LAST, after the whole graph is assembled, so it sees every present-file entity.
+    _ensure_data_entities_in_haspart(ctx.graph, ctx.root)
+    _write_crate_files(ctx, model)
+
+
+def _emit_scaffold(ctx: _WriteCtx) -> None:
+    """Emit the descriptor, root, license, and profile contextual entities.
+
+    Also applies the workflow-like extra-conformsTo rule (workflow/provenance roots SHOULD
+    also declare the Process Run Crate + Workflow RO-Crate profiles, each linked to a Profile
+    entity). Initializes ctx.root in place with empty hasPart/mentions arrays."""
+    graph = ctx.graph
+    model = ctx.model
+    cfg = ctx.cfg
     descriptor = {
         "@id": "ro-crate-metadata.json",
         "@type": "CreativeWork",
-        "about": {"@id": "./"},
+        "about": root_ref(),
         # Fixed at RO-Crate 1.2 (the descriptor MUST conform to exactly this; SPEC §15.2).
-        "conformsTo": {"@id": RO_CRATE_SPEC_URI},
+        "conformsTo": ref(RO_CRATE_SPEC_URI),
     }
-    root: dict[str, Any] = {
-        "@id": "./",
-        "@type": "Dataset",
-        # crate_name overrides the run title for the crate's display name when set.
-        "name": cfg.crate_name or model.title,
-        "description": model.description,
-        "datePublished": published_at,
-        "dateCreated": model.created_at,
-        "dateModified": model.updated_at,
-        "license": {"@id": DEFAULT_LICENSE},
-        "conformsTo": [{"@id": model.profile_uri}],
-        "hasPart": [],
-        "mentions": [],
-    }
+    root = ctx.root
+    root.update(
+        {
+            "@id": ROOT_DATASET_ID,
+            "@type": "Dataset",
+            # crate_name overrides the run title for the crate's display name when set.
+            "name": cfg.crate_name or model.title,
+            "description": model.description,
+            "datePublished": ctx.published_at,
+            "dateCreated": model.created_at,
+            "dateModified": model.updated_at,
+            "license": ref(DEFAULT_LICENSE),
+            "conformsTo": [ref(model.profile_uri)],
+            "hasPart": [],
+            "mentions": [],
+        }
+    )
     if model.aborted:
         # Surface an aborted run on the crate root so a consumer can tell it ended early.
+        # Carries propertyID but no name, so it is open-coded rather than via property_value.
         root["additionalProperty"] = {
             "@type": "PropertyValue",
             "propertyID": "run-status",
@@ -223,27 +272,44 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     # L3 (WfRC 0.5 SHOULD): a workflow/provenance crate's root conformsTo SHOULD also declare
     # the Process Run Crate 0.5 + Workflow RO-Crate 1.0 profiles, and EACH listed profile MUST
     # link to a contextual Profile entity (RO-Crate 1.2 MUST).
-    if model.selected_profile in WORKFLOW_LIKE_PROFILES:
-        extra_profiles = {
-            PROFILE_URIS["process"]: "Process Run Crate",
+    spec = PROFILES.get(model.selected_profile)
+    if spec is not None and spec.is_workflow_like:
+        # Display names for the extra Profile contextual entities, keyed by the URIs the
+        # registry declares as this profile's extra conformance.
+        profile_labels = {
+            PROFILES["process"].uri: "Process Run Crate",
             WORKFLOW_RO_CRATE_URI: "Workflow RO-Crate",
         }
-        for uri, label in extra_profiles.items():
-            if {"@id": uri} not in root["conformsTo"]:
-                root["conformsTo"].append({"@id": uri})
+        for uri in spec.extra_conformsTo:
+            if ref(uri) not in root["conformsTo"]:
+                root["conformsTo"].append(ref(uri))
             graph.append(
                 {
                     "@id": uri,
                     "@type": ["CreativeWork", "Profile"],
-                    "name": label,
+                    "name": profile_labels[uri],
                 }
             )
 
-    # --- Actors, software, provenance context ---
+
+def _emit_context_entities(ctx: _WriteCtx) -> None:
+    """Emit actors, software, and the run's provenance-context entities.
+
+    Captures the git diff (honouring file_policy.include_git_diff), references the context
+    entities (git state + diff, environment, containers, dependency manifests) from root
+    mentions, and copies any context File artifacts into the crate so their relative @ids
+    correspond to present files."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    root = ctx.root
+    model = ctx.model
+    project_dir = ctx.project_dir
+    crate_dir = ctx.crate_dir
     graph.extend(mapping.build_actors(model))
     graph.extend(mapping.build_software(model))
     # Honour file_policy.include_git_diff: capture diff when enabled and tree is dirty.
-    _maybe_capture_git_diff(model, cfg, project_dir, crate_dir)
+    _maybe_capture_git_diff(model, ctx.cfg, project_dir, crate_dir)
     # Reference the run's provenance-context entities (git state + diff, environment,
     # containers, dependency manifests) from the root so they are discoverable expected
     # information — otherwise they (and any #embedded PropertyValue children) are orphans.
@@ -255,7 +321,7 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     )
     graph.extend(context_entities)
     for ctx_entity in context_entities:
-        root["mentions"].append({"@id": ctx_entity["@id"]})
+        root["mentions"].append(ref(ctx_entity["@id"]))
     # Copy provenance-context File artifacts (git-diff patch, dependency manifests) that rcr
     # discovered/created into the crate so their relative @ids correspond to present files
     # (RO-Crate 1.2 §4) and the crate re-loads via ro-crate-py.  The final hasPart pass below
@@ -271,170 +337,206 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         if not (crate_dir / cid).exists():
             _copy_into_crate(project_dir / cid, crate_dir / cid)
 
-    # --- Parameters ---
+
+def _emit_parameters(ctx: _WriteCtx) -> None:
+    """Emit run parameters and the workflow formal-parameter entities.
+
+    Stashes the produced formal-parameter map on ctx (file emitters key descriptions off it),
+    and plans file inclusion now so the declared-files and command emitters share one plan set."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    root = ctx.root
+    model = ctx.model
     param_entities = mapping.build_parameters(model)
     graph.extend(param_entities)
     for e in param_entities:
-        root["mentions"].append({"@id": e["@id"]})
+        root["mentions"].append(ref(e["@id"]))
     wf_params, formal_param_map = mapping.workflow_formal_parameters(model)
     graph.extend(wf_params)
+    ctx.formal_param_map = formal_param_map
+    ctx.plans = {
+        plan.file_id: plan for plan in plan_file_inclusion(model, ctx.cfg, ctx.project_dir)
+    }
 
-    # --- Files (declared inputs/outputs + command outputs) ---
-    # hash_policy.hash_large_files overrides the size gate: hash files of ANY size.
-    max_hash_bytes = (
-        sys.maxsize if cfg.hash_policy.hash_large_files
-        else cfg.hash_policy.max_file_size_mb * 1024 * 1024
-    )
-    plans = {plan.file_id: plan for plan in plan_file_inclusion(model, cfg, project_dir)}
-    file_ids: set[str] = set()
-    ctx = _WriteCtx(
-        graph=graph,
-        root=root,
-        model=model,
-        cfg=cfg,
-        crate_dir=crate_dir,
-        project_dir=project_dir,
-        id_map=id_map,
-        plans=plans,
-        formal_param_map=formal_param_map,
-        file_ids=file_ids,
-        max_hash_bytes=max_hash_bytes,
-        published_at=published_at,
-    )
 
-    for plan in plans.values():
-        fp_id = formal_param_map.get(str(plan.declared.get("path", plan.file_id)))
+def _emit_declared_files(ctx: _WriteCtx) -> None:
+    """Emit File entities for declared inputs/outputs and copy included bodies into the crate.
+
+    Included files are linked from hasPart; a declared input that policy does not copy is still
+    referenced from mentions so the user's explicitly-declared input is never an orphan. Seeds
+    the cross-section ctx.file_ids accumulator."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    root = ctx.root
+    crate_dir = ctx.crate_dir
+    max_hash_bytes = ctx.max_hash_bytes
+    for plan in ctx.plans.values():
+        fp_id = ctx.formal_param_map.get(str(plan.declared.get("path", plan.file_id)))
         entity = mapping.build_file_entity(plan, max_hash_bytes, fp_id)
         graph.append(entity)
-        file_ids.add(plan.file_id)
+        ctx.file_ids.add(plan.file_id)
         if plan.included:
-            root["hasPart"].append({"@id": plan.file_id})
-        elif getattr(plan, "role", "") == "input":
+            root["hasPart"].append(ref(plan.file_id))
+        elif plan.role == "input":
             # A declared input that policy does NOT copy into the crate (e.g. an external /
             # by-reference dataset) must still be reachable from the root — otherwise the
             # user's explicitly-declared input is an orphan, silently absent from the crate's
             # navigable structure. Reference it via `mentions` (it is described, not a copied
             # data part).
-            root["mentions"].append({"@id": plan.file_id})
+            root["mentions"].append(ref(plan.file_id))
         if plan.copy:
             _copy_into_crate(plan.abs_path, crate_dir / plan.file_id)
 
-    # --- Workflow (mainEntity) ---
+
+def _emit_workflow(ctx: _WriteCtx) -> list[dict[str, Any]]:
+    """Emit the workflow (mainEntity) and, when present, the workflow-level action.
+
+    Returns the workflow entities so the synthetic-step weave can attach steps to them. A
+    synthesized workflow is referenced via mainEntity only (it is abstract, not a data file);
+    a real workflow file is additionally linked from hasPart."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    root = ctx.root
+    model = ctx.model
+    id_map = ctx.id_map
     workflow_entities = mapping.build_workflow(model, id_map)
     graph.extend(workflow_entities)
     if workflow_entities:
         wf_id = workflow_entities[0]["@id"]
-        root["mainEntity"] = {"@id": wf_id}
+        root["mainEntity"] = ref(wf_id)
         # A synthesized workflow is an abstract entity (the agent's actions), not a file,
         # so it is referenced via mainEntity only and is not part of the data payload.
         synthetic_wf = bool(model.workflow and model.workflow.get("synthetic"))
-        if not synthetic_wf and {"@id": wf_id} not in root["hasPart"]:
-            root["hasPart"].append({"@id": wf_id})
+        if not synthetic_wf and ref(wf_id) not in root["hasPart"]:
+            root["hasPart"].append(ref(wf_id))
 
-    # --- Workflow-level action (workflow/provenance profiles only) ---
+    # Workflow-level action (workflow/provenance profiles only).
     if workflow_entities:
         wf_action_entities = mapping.build_workflow_action(
-            model, id_map, workflow_entities[0]["@id"], project_dir
+            model, id_map, workflow_entities[0]["@id"], ctx.project_dir
         )
         graph.extend(wf_action_entities)
         for e in wf_action_entities:
-            root["mentions"].append({"@id": e["@id"]})
+            root["mentions"].append(ref(e["@id"]))
+    return workflow_entities
 
-    # --- Steps (HowToStep + ControlAction) ---
-    graph.extend(mapping.build_steps(model, id_map))
 
-    # --- Command actions ---
-    for command in model.commands:
-        _emit_command_file_entities(ctx, command)
+def _emit_steps(ctx: _WriteCtx) -> None:
+    """Emit declared steps (HowToStep + ControlAction)."""
+    from ro_crate_run.materialize import mapping
 
-    # --- Agent action families (SPEC §16: the Claude agent's actions ARE the workflow) ---
-    agent_action_entities = mapping.build_agent_actions(model, project_dir, file_ids)
+    ctx.graph.extend(mapping.build_steps(ctx.model, ctx.id_map))
+
+
+def _emit_agent_actions(ctx: _WriteCtx) -> None:
+    """Emit the agent action families (SPEC §16: the Claude agent's actions ARE the workflow).
+
+    SoftwareApplication/File/Dataset entities are referenced by the actions, so they are not
+    mentioned directly from the root; every other emitted action is added to mentions."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    root = ctx.root
+    agent_action_entities = mapping.build_agent_actions(ctx.model, ctx.project_dir, ctx.file_ids)
     graph.extend(agent_action_entities)
     for e in agent_action_entities:
         types = e["@type"] if isinstance(e["@type"], list) else [e["@type"]]
         # SoftwareApplication/File are referenced by the actions, not mentioned directly.
         if not any(str(t) in {"SoftwareApplication", "File", "Dataset"} for t in types):
-            root["mentions"].append({"@id": e["@id"]})
+            root["mentions"].append(ref(e["@id"]))
 
-    # --- Weave the agent's actions INTO the synthesized workflow as ordered steps ---
-    _weave_synthetic_workflow_steps(ctx, workflow_entities)
 
-    # --- Notes, decisions, parameter connections ---
+def _emit_notes_and_connections(ctx: _WriteCtx) -> None:
+    """Emit notes/decisions and parameter-connection entities, each referenced from mentions."""
+    from ro_crate_run.materialize import mapping
+
+    graph = ctx.graph
+    root = ctx.root
+    model = ctx.model
     note_decision = mapping.build_notes_decisions(model)
     graph.extend(note_decision)
-    root["mentions"].extend({"@id": e["@id"]} for e in note_decision)
+    root["mentions"].extend(ref(e["@id"]) for e in note_decision)
     connections = mapping.build_parameter_connections(model)
     graph.extend(connections)
-    root["mentions"].extend({"@id": e["@id"]} for e in connections)
+    root["mentions"].extend(ref(e["@id"]) for e in connections)
 
-    # --- Event journal (gate on file_policy.include_event_journal) ---
-    if cfg.file_policy.include_event_journal:
-        journal_src = state_dir / "events.ndjson"
-        if journal_src.exists():
-            journal_rel = "events.ndjson"
-            _copy_into_crate(journal_src, crate_dir / journal_rel)
-            journal_entity: dict[str, Any] = {
-                "@id": journal_rel,
-                "@type": "File",
-                "name": "Event journal",
-                "encodingFormat": "application/x-ndjson",
-                "about": {"@id": "./"},
-            }
-            # File entities SHOULD carry contentSize (bytes); a captured local File MUST also
-            # carry dateModified so a consumer can describe the embedded body (RO-Crate 1.2).
-            try:
-                journal_entity["contentSize"] = str(journal_src.stat().st_size)
-            except OSError:
-                pass
-            journal_entity["dateModified"] = published_at
-            graph.append(journal_entity)
-            root["hasPart"].append({"@id": journal_rel})
 
-    # --- Human decisions: materialize AskUserQuestion / plan approvals ---
-    decision_entities = _build_tool_decisions(model)
-    graph.extend(decision_entities)
-    root["mentions"].extend({"@id": e["@id"]} for e in decision_entities)
+def _emit_event_journal(ctx: _WriteCtx, state_dir: Path) -> None:
+    """Embed the event journal as a File entity, gated on file_policy.include_event_journal."""
+    if not ctx.cfg.file_policy.include_event_journal:
+        return
+    journal_src = state_dir / "events.ndjson"
+    if not journal_src.exists():
+        return
+    journal_rel = "events.ndjson"
+    _copy_into_crate(journal_src, ctx.crate_dir / journal_rel)
+    journal_entity: dict[str, Any] = {
+        "@id": journal_rel,
+        "@type": "File",
+        "name": "Event journal",
+        "encodingFormat": "application/x-ndjson",
+        "about": root_ref(),
+    }
+    # File entities SHOULD carry contentSize (bytes); a captured local File MUST also
+    # carry dateModified so a consumer can describe the embedded body (RO-Crate 1.2).
+    try:
+        journal_entity["contentSize"] = str(journal_src.stat().st_size)
+    except OSError:
+        pass
+    journal_entity["dateModified"] = ctx.published_at
+    ctx.graph.append(journal_entity)
+    ctx.root["hasPart"].append(ref(journal_rel))
 
-    # --- README.md (WfRC SHOULD; harmless for process crates too) ---
-    # Only GENERATE one when the run did not already produce/declare a README.md: writing a
-    # generated README over a captured project README would corrupt that File's recorded
-    # sha256 (an @id collision -> file_content_mismatch). An existing README.md already
-    # satisfies the SHOULD; the hasPart pass below ensures it is linked.
+
+def _emit_tool_decisions(ctx: _WriteCtx) -> None:
+    """Emit materialized human decisions (AskUserQuestion / plan approvals) into mentions."""
+    decision_entities = _build_tool_decisions(ctx.model)
+    ctx.graph.extend(decision_entities)
+    ctx.root["mentions"].extend(ref(e["@id"]) for e in decision_entities)
+
+
+def _emit_readme(ctx: _WriteCtx) -> None:
+    """Generate a README.md (WfRC SHOULD; harmless for process crates too).
+
+    Only GENERATE one when the run did not already produce/declare a README.md: writing a
+    generated README over a captured project README would corrupt that File's recorded sha256
+    (an @id collision -> file_content_mismatch). An existing README.md already satisfies the
+    SHOULD; the hasPart pass ensures it is linked."""
+    graph = ctx.graph
     readme_rel = "README.md"
-    if readme_rel not in {e.get("@id") for e in graph}:
-        _write_readme(crate_dir / readme_rel, model)
-        readme_entity: dict[str, Any] = {
-            "@id": readme_rel,
-            "@type": "File",
-            "encodingFormat": "text/markdown",
-            "name": "Run README",
-            "about": {"@id": "./"},
-        }
-        try:
-            stat = (crate_dir / readme_rel).stat()
-            readme_entity["contentSize"] = str(stat.st_size)
-            readme_entity["dateModified"] = published_at
-        except OSError:
-            pass
-        graph.append(readme_entity)
-        root["hasPart"].append({"@id": readme_rel})
+    if readme_rel in {e.get("@id") for e in graph}:
+        return
+    _write_readme(ctx.crate_dir / readme_rel, ctx.model)
+    readme_entity: dict[str, Any] = {
+        "@id": readme_rel,
+        "@type": "File",
+        "encodingFormat": "text/markdown",
+        "name": "Run README",
+        "about": root_ref(),
+    }
+    try:
+        stat = (ctx.crate_dir / readme_rel).stat()
+        readme_entity["contentSize"] = str(stat.st_size)
+        readme_entity["dateModified"] = ctx.published_at
+    except OSError:
+        pass
+    graph.append(readme_entity)
+    ctx.root["hasPart"].append(ref(readme_rel))
 
-    # --- Every File/Dataset data entity reachable from root hasPart (RO-Crate 1.2 MUST) ---
-    # After the whole graph is assembled, ensure every present-file data entity (sidecars,
-    # stdout/stderr logs, git-diff patch, dependency manifests, declared inputs/outputs)
-    # appears in hasPart — contextual (#-prefixed) entities, absolute-URI (web/by-reference)
-    # entities, and the metadata descriptor are excluded.
-    _ensure_data_entities_in_haspart(graph, root)
 
-    # --- Write ---
+def _write_crate_files(ctx: _WriteCtx, model: RunModel) -> None:
+    """Dedupe/strip the assembled graph and write ro-crate-metadata.json + run-summary.json."""
     data = {
         "@context": [RO_CRATE_CONTEXT, WORKFLOW_RUN_CONTEXT],
-        "@graph": _dedupe(strip_none(graph)),
+        "@graph": _dedupe(strip_none(ctx.graph)),
     }
-    _write_metadata_with_rocrate(crate_dir, data)
+    _write_metadata_with_rocrate(ctx.crate_dir, data)
     from .summary import run_summary
 
-    (crate_dir / "run-summary.json").write_text(
+    (ctx.crate_dir / "run-summary.json").write_text(
         json.dumps(run_summary(model), indent=2, sort_keys=True) + "\n"
     )
 
@@ -466,7 +568,7 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
     # command's invocation record + logs are reachable (they carry about->action, but
     # that alone leaves them undiscoverable by a downward walk from the root).
     for e in entities:
-        root["mentions"].append({"@id": e["@id"]})
+        root["mentions"].append(ref(e["@id"]))
     # Copy logs/sidecars
     for rel in (command.sidecar, command.stdout_log, command.stderr_log):
         if rel and log_should_copy(rel, project_dir, cfg):
@@ -480,7 +582,7 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
                 fp_id2 = formal_param_map.get(str(output_plan.declared.get("path", output_id)))
                 graph.append(mapping.build_file_entity(output_plan, max_hash_bytes, fp_id2))
                 if output_plan.included:
-                    root["hasPart"].append({"@id": output_id})
+                    root["hasPart"].append(ref(output_id))
                 if output_plan.copy:
                     _copy_into_crate(output_plan.abs_path, crate_dir / output_id)
             else:
@@ -491,7 +593,7 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
                     declared={"path": output, "description": "Command output"},
                 )
                 graph.append(mapping.build_file_entity(fallback, max_hash_bytes))
-                root["hasPart"].append({"@id": output_id})
+                root["hasPart"].append(ref(output_id))
             file_ids.add(output_id)
     # Ensure command inputs referenced as the action's `object` have File entities
     # even when not separately declared via `rcr input` (otherwise the object ref
@@ -553,14 +655,14 @@ def _ensure_data_entities_in_haspart(graph: list[dict[str, Any]], root: dict[str
     hasPart, so this link is also what makes the emitted crate re-load via ro-crate-py.
     Existing hasPart entries and any `mentions` links are preserved."""
     has_part = root.setdefault("hasPart", [])
-    present = {ref.get("@id") for ref in has_part if isinstance(ref, dict)}
+    present = {link.get("@id") for link in has_part if isinstance(link, dict)}
     for entity in graph:
         entity_id = entity.get("@id")
         if not isinstance(entity_id, str):
             continue
         if entity_id in present:
             continue
-        if entity_id.startswith("#") or entity_id in {"./", "ro-crate-metadata.json"}:
+        if entity_id.startswith("#") or entity_id in {ROOT_DATASET_ID, "ro-crate-metadata.json"}:
             continue
         if is_web_id(entity_id):
             continue
@@ -568,7 +670,7 @@ def _ensure_data_entities_in_haspart(graph: list[dict[str, Any]], root: dict[str
         type_list = types if isinstance(types, list) else [types]
         if not any(str(t) in {"File", "Dataset"} for t in type_list):
             continue
-        has_part.append({"@id": entity_id})
+        has_part.append(ref(entity_id))
         present.add(entity_id)
 
 
@@ -596,13 +698,12 @@ def _write_readme(path: Path, model: RunModel) -> None:
 def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
     """Materialize captured human decisions (AskUserQuestion answers, approved plans).
 
-    Reads model.tool_decisions defensively (absent on older models), attributing each
-    decision to the human actor.  Ids use the ``#tool-decision/<sequence>`` namespace, which
-    is disjoint from the ``#decision/<index>`` ids minted by build_notes_decisions, so the
-    two decision families never collide when merged into the same graph."""
-    decisions = getattr(model, "tool_decisions", []) or []
+    Attributes each decision to the human actor.  Ids use the ``#tool-decision/<sequence>``
+    namespace, which is disjoint from the ``#decision/<index>`` ids minted by
+    build_notes_decisions, so the two decision families never collide when merged into the
+    same graph."""
     entities: list[dict[str, Any]] = []
-    for decision in decisions:
+    for decision in model.agent_activity.tool_decisions:
         if not isinstance(decision, dict):
             continue
         seq = decision.get("sequence")
@@ -618,7 +719,7 @@ def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
                 "@id": decision_id,
                 "@type": "ChooseAction",
                 "name": question or "User decision",
-                "agent": {"@id": "#actor/human"},
+                "agent": ref(crate_actor_id("human")),
                 "object": question,
                 "result": decision.get("answer"),
                 "startTime": timestamp,
@@ -626,8 +727,7 @@ def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
             }
             if options:
                 entity["additionalProperty"] = [
-                    {"@type": "PropertyValue", "name": "option", "value": str(opt)}
-                    for opt in options
+                    property_value("option", str(opt)) for opt in options
                 ]
             entities.append(entity)
         elif tool in {"ExitPlanMode", "EnterPlanMode"}:
@@ -637,7 +737,7 @@ def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
                     "@type": ["CreativeWork"],
                     "name": "Approved plan",
                     "text": decision.get("plan"),
-                    "creator": {"@id": "#actor/human"},
+                    "creator": ref(crate_actor_id("human")),
                     "dateCreated": timestamp,
                 }
             )
@@ -695,7 +795,7 @@ def _record_profile_selection(state_dir: Path, model: RunModel, requested_profil
 
 
 def _maybe_capture_git_diff(
-    model: RunModel, cfg: Any, project_dir: Path, crate_dir: Path
+    model: RunModel, cfg: RcrConfig, project_dir: Path, crate_dir: Path
 ) -> None:
     """Capture git diff and set model.git['diff_file'] when file_policy.include_git_diff
     permits it.  SPEC §14.4: the flag controls whether git diff output is written."""
@@ -768,6 +868,6 @@ def _rocrate_compatible(value: Any, embedded_entities: dict[str, dict[str, Any]]
             converted["@id"] = embedded_id
             embedded_entities[embedded_id] = converted
             # Return a REFERENCE to the now-top-level entity, not the inline dict.
-            return {"@id": embedded_id}
+            return ref(embedded_id)
         return converted
     return value

@@ -10,9 +10,17 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ro_crate_run.fs import bare_sha256
 from ro_crate_run.models import RunModel
 
-from ._helpers import _content_size, _strip_none
+from ._helpers import (
+    _content_size,
+    property_value,
+    ref,
+    root_creative_work,
+    sha256_identifier,
+    strip_none,
+)
 
 
 def build_git(
@@ -28,16 +36,10 @@ def build_git(
         return []
     props: list[dict[str, Any]] = []
     if git.get("branch"):
-        props.append({"@type": "PropertyValue", "name": "branch", "value": str(git["branch"])})
-    props.append(
-        {
-            "@type": "PropertyValue",
-            "name": "dirty",
-            "value": "true" if git.get("status") else "false",
-        }
-    )
+        props.append(property_value("branch", str(git["branch"])))
+    props.append(property_value("dirty", "true" if git.get("status") else "false"))
     if git.get("remote"):
-        props.append({"@type": "PropertyValue", "name": "remote", "value": str(git["remote"])})
+        props.append(property_value("remote", str(git["remote"])))
     entity: dict[str, Any] = {
         "@id": "#git/state",
         "@type": "Thing",
@@ -45,14 +47,14 @@ def build_git(
         "identifier": git.get("commit"),
         "additionalProperty": props,
     }
-    entities: list[dict[str, Any]] = [_strip_none(entity)]
+    entities: list[dict[str, Any]] = [strip_none(entity)]
     if git.get("diff_file"):
         diff_entity: dict[str, Any] = {
             "@id": str(git["diff_file"]),
             "@type": "File",
             "name": "git diff",
             "encodingFormat": "text/x-patch",
-            "about": {"@id": "#git/state"},
+            "about": ref("#git/state"),
         }
         if project_dir is not None:
             size = _content_size(str(git["diff_file"]), project_dir)
@@ -68,7 +70,7 @@ def build_environment(model: RunModel) -> list[dict[str, Any]]:
     if not isinstance(env_vars, dict):
         return []
     return [
-        {"@id": f"#env/{name}", "@type": "PropertyValue", "name": name, "value": str(value)}
+        {"@id": f"#env/{name}", **property_value(name, str(value))}
         for name, value in sorted(env_vars.items())
     ]
 
@@ -94,25 +96,25 @@ def build_containers(model: RunModel) -> list[dict[str, Any]]:
     """Emit a ContainerImage entity per observed container."""
     entities: list[dict[str, Any]] = []
     for idx, container in enumerate(model.containers, start=1):
-        digest = str(container.get("digest", "")).replace("sha256:", "")
+        digest = bare_sha256(str(container.get("digest", "")))
         entity = {
             "@id": f"#container/{idx}",
             "@type": "ContainerImage",
             # ContainerImage SHOULD list additionalType (a workflow-run namespace URI)
             # alongside registry + name (Process/Workflow 0.5 SHOULD).
-            "additionalType": {
-                "@id": _container_additional_type(
+            "additionalType": ref(
+                _container_additional_type(
                     str(container.get("registry", "")),
                     str(container.get("image", "")),
                     str(container.get("tag", "")),
                 )
-            },
+            ),
             "registry": container.get("registry"),
             "name": container.get("image"),
             "tag": container.get("tag"),
             "sha256": digest or None,
         }
-        entities.append(_strip_none(entity))
+        entities.append(strip_none(entity))
     return entities
 
 
@@ -121,9 +123,9 @@ def build_dependencies(
 ) -> list[dict[str, Any]]:
     """Emit a File entity per observed dependency lockfile / manifest.
 
-    Carries the recorded sha256 so the manifest is verifiable (the digest is captured at
-    scan time but was previously dropped), and gives it a sensible description.
-    ``project_dir`` (optional) is used only to populate ``contentSize`` (base 1.2 SHOULD).
+    Carries the recorded sha256 (captured at scan time) so the manifest is content-verifiable,
+    and gives it a sensible description. ``project_dir`` (optional) is used only to populate
+    ``contentSize`` (base 1.2 SHOULD).
     """
     entities: list[dict[str, Any]] = []
     for dep in model.dependencies:
@@ -135,13 +137,9 @@ def build_dependencies(
             "name": name,
             "description": f"Dependency manifest ({kind})",
         }
-        digest = str(dep.get("file_record", "")).replace("sha256:", "")
+        digest = bare_sha256(str(dep.get("file_record", "")))
         if digest:
-            entity["identifier"] = {
-                "@type": "PropertyValue",
-                "propertyID": "sha256",
-                "value": digest,
-            }
+            entity["identifier"] = sha256_identifier(digest)
         if project_dir is not None:
             size = _content_size(str(dep["path"]), project_dir)
             if size is not None:
@@ -156,24 +154,21 @@ def build_notes_decisions(model: RunModel) -> list[dict[str, Any]]:
     for idx, note in enumerate(model.notes, start=1):
         if note.get("visibility") == "public":
             entities.append(
-                {
-                    "@id": f"#note/{idx}",
-                    "@type": "CreativeWork",
-                    "name": f"Public note {idx}",
-                    "text": note.get("text", ""),
-                    "about": {"@id": "./"},
-                }
+                root_creative_work(
+                    f"#note/{idx}", f"Public note {idx}", note.get("text", "")
+                )
             )
     for idx, decision in enumerate(model.decisions, start=1):
         if decision.get("visibility") == "public":
-            entity: dict[str, Any] = {
-                "@id": f"#decision/{idx}",
-                "@type": "CreativeWork",
-                "name": f"Decision {idx}",
-                "text": decision.get("text", ""),
-                "about": {"@id": "./"},
-            }
-            if decision.get("rationale"):
-                entity["description"] = f"Rationale: {decision['rationale']}"
-            entities.append(entity)
+            description = (
+                f"Rationale: {decision['rationale']}" if decision.get("rationale") else None
+            )
+            entities.append(
+                root_creative_work(
+                    f"#decision/{idx}",
+                    f"Decision {idx}",
+                    decision.get("text", ""),
+                    description=description,
+                )
+            )
     return entities

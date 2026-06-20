@@ -13,11 +13,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .constants import BYTES_PER_MB, SIDECAR_SCHEMA_VERSION, STARTUP_EXIT_CODE
 from .fs import file_record
 from .git import observe_git_state
 from .ids import IdMap
 from .journal import EventWriter
-from .redaction import Redactor
+from .models import RedactionResult
+from .redaction import Redactor, redaction_event_payload
 from .state import load_config, load_state
 from .time import utc_now
 
@@ -45,6 +47,60 @@ class CommandRunner:
                         seen.add(str(path))
         return records
 
+    @staticmethod
+    def _classify_exit(returncode: int) -> tuple[int | None, str | None]:
+        """Map a process return code to its (signal_number, failure_class).
+
+        A negative return code from ``Popen.wait`` encodes termination by signal
+        ``-returncode``; a positive non-zero code is an ordinary non-zero exit;
+        zero is success (no failure class).
+        """
+        signal_num: int | None = -returncode if returncode < 0 else None
+        if returncode == 0:
+            return None, None
+        return signal_num, "signal" if signal_num is not None else "nonzero_exit"
+
+    def _finalize(
+        self,
+        *,
+        writer: EventWriter,
+        sidecar_path: Path,
+        sidecar: dict[str, Any],
+        redactor: Redactor,
+        sidecar_redactions: int,
+        redaction_results: list[RedactionResult],
+        terminal_payload: dict[str, Any],
+        event_type: str,
+        step: str | None,
+    ) -> None:
+        """Shared terminal path for both startup-error and normal exit.
+
+        Persists the (final) sidecar, appends the completed/failed event with the
+        already-assembled payload, then emits the redaction tally via the
+        canonical ``redaction_event_payload`` builder so the event carries real
+        category names instead of a hardcoded empty list. The sidecar write's own
+        redaction count is folded in as a category-less result, keeping the
+        ``applied`` total identical while populating ``categories`` where known.
+        """
+        sidecar_redactions += _write_sidecar(sidecar_path, sidecar, redactor)
+        writer.append(
+            event_type,
+            terminal_payload,
+            source_kind="human_cli",
+            step_id=step,
+        )
+        # Fold the sidecar's integer-only redaction count into the tally as a
+        # result with no categories (we have a count but not the matched names).
+        results = [*redaction_results, RedactionResult("", sidecar_redactions, ())]
+        payload = redaction_event_payload("execution.command", *results)
+        if payload["applied"]:
+            writer.append(
+                "redaction.applied",
+                payload,
+                source_kind="human_cli",
+                redacted=True,
+            )
+
     def run(
         self,
         argv: list[str],
@@ -65,10 +121,9 @@ class CommandRunner:
         redactor = Redactor.for_state_dir(self.state_dir)
         argv_results = [redactor.redact_text(arg) for arg in argv]
         recorded_argv = [r.text for r in argv_results]
-        argv_applied = sum(r.applied for r in argv_results)
         recorded_display = redactor.redact_text(shlex.join(argv)).text
         env_capture = redactor.capture_environment(dict(os.environ))
-        max_hash_bytes = cfg.hash_policy.max_file_size_mb * 1024 * 1024
+        max_hash_bytes = cfg.hash_policy.max_file_size_mb * BYTES_PER_MB
         input_snapshots = [
             file_record(
                 self.project_dir / inp,
@@ -104,7 +159,7 @@ class CommandRunner:
             step_id=step,
         )
         sidecar = {
-            "schema_version": "1.0.0",
+            "schema_version": SIDECAR_SCHEMA_VERSION,
             "command_id": command_id,
             "action_id": action_id,
             "started_event_id": started_event.event_id,
@@ -129,7 +184,7 @@ class CommandRunner:
         def _pump(name: str, pipe: Any, path: Path) -> None:
             # Runs in a thread; an unhandled exception here would die silently at join(),
             # leaving the command journaled as completed with truncated logs. Capture any
-            # write/IO failure so it is recorded on the command record instead.
+            # write/IO/decode failure so it is recorded on the command record instead.
             applied = 0
             try:
                 with path.open("w", encoding="utf-8") as handle:
@@ -137,7 +192,9 @@ class CommandRunner:
                         redacted = redactor.redact_text(line)
                         handle.write(redacted.text)
                         applied += redacted.applied
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
+                # ValueError covers a UnicodeDecodeError that escapes the pipe even
+                # with errors="replace" (e.g. a closed-pipe read on a detached fd).
                 pump_errors[name] = f"{type(exc).__name__}: {exc}"
             finally:
                 stream_counts[name] = applied
@@ -151,6 +208,12 @@ class CommandRunner:
                 argv,
                 cwd=str(self.project_dir),
                 text=True,
+                # errors="replace" so non-UTF-8 child output substitutes the
+                # replacement character instead of raising mid-readline and
+                # killing the pump thread; provenance capture must survive
+                # arbitrary bytes.
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=1,
@@ -166,7 +229,7 @@ class CommandRunner:
                 {
                     "ended_at": ended_at,
                     "duration_seconds": duration,
-                    "exit_code": 127,
+                    "exit_code": STARTUP_EXIT_CODE,
                     "signal": None,
                     "failure_class": "startup_error",
                     "terminal_status": "failed",
@@ -176,17 +239,21 @@ class CommandRunner:
                     "output_snapshots": outputs_after,
                 }
             )
-            sidecar_redactions += _write_sidecar(sidecar_path, sidecar, redactor)
-            writer.append(
-                "execution.command.failed",
-                {
+            self._finalize(
+                writer=writer,
+                sidecar_path=sidecar_path,
+                sidecar=sidecar,
+                redactor=redactor,
+                sidecar_redactions=sidecar_redactions,
+                redaction_results=[*argv_results, stderr_result],
+                terminal_payload={
                     "command_id": command_id,
                     "action_id": action_id,
                     "started_event_id": started_event.event_id,
                     "argv": recorded_argv,
                     "cwd": str(self.project_dir),
                     "display_command": recorded_display,
-                    "exit_code": 127,
+                    "exit_code": STARTUP_EXIT_CODE,
                     "ended_at": ended_at,
                     "duration_seconds": duration,
                     "failure_class": "startup_error",
@@ -197,18 +264,10 @@ class CommandRunner:
                     "inputs": inputs,
                     "outputs": outputs,
                 },
-                source_kind="human_cli",
-                step_id=step,
+                event_type="execution.command.failed",
+                step=step,
             )
-            total_applied = argv_applied + stderr_result.applied + sidecar_redactions
-            if total_applied:
-                writer.append(
-                    "redaction.applied",
-                    {"context": "execution.command", "applied": total_applied, "categories": []},
-                    source_kind="human_cli",
-                    redacted=True,
-                )
-            return 127
+            return STARTUP_EXIT_CODE
         threads = [
             threading.Thread(target=_pump, args=("stdout", proc.stdout, stdout_path)),
             threading.Thread(target=_pump, args=("stderr", proc.stderr, stderr_path)),
@@ -220,14 +279,7 @@ class CommandRunner:
             thread.join()
         duration = time.monotonic() - start
         ended_at = utc_now()
-        signal_num: int | None = -returncode if returncode < 0 else None
-        failure_class: str | None = (
-            None
-            if returncode == 0
-            else "signal"
-            if signal_num is not None
-            else "nonzero_exit"
-        )
+        signal_num, failure_class = self._classify_exit(returncode)
         outputs_after = self._snapshot(outputs, cfg.output_roots, max_hash_bytes)
         sidecar.update(
             {
@@ -243,8 +295,7 @@ class CommandRunner:
         )
         if pump_errors:
             sidecar["log_write_errors"] = pump_errors
-        sidecar_redactions += _write_sidecar(sidecar_path, sidecar, redactor)
-        payload = {
+        payload: dict[str, Any] = {
             "command_id": command_id,
             "action_id": action_id,
             "started_event_id": started_event.event_id,
@@ -263,30 +314,30 @@ class CommandRunner:
         if pump_errors:
             # Surface truncated/incomplete logs on the command record (not silently lost).
             payload["log_write_errors"] = pump_errors
-        failure_payload: dict[str, Any] = {}
         if returncode != 0:
-            failure_payload["failure_class"] = failure_class or "nonzero_exit"
+            payload["failure_class"] = failure_class or "nonzero_exit"
             if signal_num is not None:
-                failure_payload["signal"] = signal_num
-        writer.append(
-            "execution.command.completed" if returncode == 0 else "execution.command.failed",
-            payload | failure_payload,
-            source_kind="human_cli",
-            step_id=step,
+                payload["signal"] = signal_num
+        # The streaming pumps tally how many redactions they applied but not which
+        # categories; surface them as count-only results so the tally total stays
+        # exact while argv categories are still reported.
+        stream_results = [
+            RedactionResult("", stream_counts["stdout"], ()),
+            RedactionResult("", stream_counts["stderr"], ()),
+        ]
+        self._finalize(
+            writer=writer,
+            sidecar_path=sidecar_path,
+            sidecar=sidecar,
+            redactor=redactor,
+            sidecar_redactions=sidecar_redactions,
+            redaction_results=[*argv_results, *stream_results],
+            terminal_payload=payload,
+            event_type=(
+                "execution.command.completed" if returncode == 0 else "execution.command.failed"
+            ),
+            step=step,
         )
-        total_applied = (
-            stream_counts["stdout"]
-            + stream_counts["stderr"]
-            + argv_applied
-            + sidecar_redactions
-        )
-        if total_applied:
-            writer.append(
-                "redaction.applied",
-                {"context": "execution.command", "applied": total_applied, "categories": []},
-                source_kind="human_cli",
-                redacted=True,
-            )
         return returncode
 
 

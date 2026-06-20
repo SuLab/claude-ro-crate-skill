@@ -9,9 +9,9 @@ project-relative file ``@id``s come from ``ids.relative_file_id`` /
 ``ids.file_ref``, and the actor roster (names, ``@type``, ids) comes from
 ``events`` so the same identities are maintained in exactly one place.
 
-This package re-exports every builder so the original flat-module import surface
-(``from ro_crate_run.materialize import mapping`` then qualified ``mapping.build_X``)
-keeps working byte-unchanged. The builders are grouped into cohesive submodules
+This package re-exports every builder so callers can ``from ro_crate_run.materialize
+import mapping`` and call ``mapping.build_X`` without knowing the submodule layout. The
+builders are grouped into cohesive submodules
 (``actors``/``actions``/``file_entities``/``parameters``/``workflow``/``provenance``)
 with cross-domain helpers in ``_helpers``.
 """

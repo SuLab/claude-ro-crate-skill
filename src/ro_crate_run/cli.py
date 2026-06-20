@@ -9,7 +9,7 @@ import json
 from collections.abc import Sequence
 
 from . import commands, install
-from .constants import PROFILE_CHOICES
+from .constants import EXISTENCE_VALUES, PROFILE_CHOICES
 from .inspect import inspect_crate, inspect_events, mermaid_graph
 
 
@@ -22,15 +22,49 @@ def _tri_state(positive: bool, negative: bool) -> bool | None:
     return True if positive else False if negative else None
 
 
+def _resolve_public(public: bool, private: bool) -> bool:
+    """Collapse a ``--public`` / ``--private`` pair into a concrete ``public`` bool.
+
+    ``note``/``decision`` handlers take a plain bool, so the tri-state is resolved
+    here: an explicit flag wins; otherwise fall back to ``privacy.public_by_default``
+    (matching ``finalize``'s semantics) so the configured default actually governs
+    visibility instead of being silently ignored.
+    """
+    chosen = _tri_state(public, private)
+    if chosen is not None:
+        return chosen
+    return _public_by_default()
+
+
+def _public_by_default() -> bool:
+    """Read ``privacy.public_by_default`` for the current project, defaulting to False.
+
+    Degrades to False when no config exists yet (e.g. outside an active run) so an
+    unflagged ``note``/``decision`` stays private, preserving prior behavior.
+    """
+    from .context import ProjectContext
+    from .state import load_config
+
+    state_dir = ProjectContext.from_cwd().state_dir
+    if not (state_dir / "config.json").exists():
+        return False
+    return load_config(state_dir).privacy.public_by_default
+
+
 def _run_inspect(args: argparse.Namespace) -> int:
+    """Render one of the inspection views (events / graph / html / crate).
+
+    The four selectors form a mutually-exclusive group, so at most one is set;
+    ``args.format`` carries the chosen view, defaulting to ``crate``.
+    """
     from .context import ProjectContext
 
     state_dir = ProjectContext.from_cwd().state_dir
-    if args.events:
+    if args.format == "events":
         print(json.dumps(inspect_events(state_dir), indent=2, sort_keys=True))
-    elif args.graph:
+    elif args.format == "graph":
         print(mermaid_graph(state_dir))
-    elif args.html:
+    elif args.format == "html":
         from .preview import render
 
         print(render(state_dir))
@@ -40,12 +74,14 @@ def _run_inspect(args: argparse.Namespace) -> int:
 
 
 def _run_step(args: argparse.Namespace) -> int:
+    """Dispatch ``step start`` / ``step end`` to the shared step handler."""
     if args.step_action == "start":
         return commands.step("start", args.step_id, args.workflow_step, args.description)
     return commands.step("end", args.step_id, status_value=args.status)
 
 
 def _run_io(args: argparse.Namespace) -> int:
+    """Adapt an ``input`` / ``output`` invocation to ``commands.declare_io``."""
     return commands.declare_io(
         args.cmd,
         args.path,
@@ -59,6 +95,7 @@ def _run_io(args: argparse.Namespace) -> int:
 
 
 def _run_command(args: argparse.Namespace) -> int:
+    """Strip a leading ``--`` separator and hand the command to ``run_command``."""
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
@@ -66,6 +103,7 @@ def _run_command(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Build the ``rcr`` parser, run recovery for stateful commands, and dispatch."""
     parser = argparse.ArgumentParser(prog="rcr")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -90,7 +128,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     vis = p.add_mutually_exclusive_group()
     vis.add_argument("--public", action="store_true")
     vis.add_argument("--private", action="store_true")
-    p.set_defaults(func=lambda a: commands.note(a.text, a.public))
+    p.set_defaults(func=lambda a: commands.note(a.text, _resolve_public(a.public, a.private)))
 
     p = sub.add_parser("decision")
     p.add_argument("text")
@@ -98,7 +136,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     vis = p.add_mutually_exclusive_group()
     vis.add_argument("--public", action="store_true")
     vis.add_argument("--private", action="store_true")
-    p.set_defaults(func=lambda a: commands.decision(a.text, a.rationale, a.public))
+    p.set_defaults(
+        func=lambda a: commands.decision(
+            a.text, a.rationale, _resolve_public(a.public, a.private)
+        )
+    )
 
     p = sub.add_parser("phase")
     p.add_argument("args", nargs="+")
@@ -126,14 +168,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         vis.add_argument("--private", action="store_true")
         p.add_argument(
             "--existence",
-            choices=[
-                "observed local",
-                "observed remote",
-                "generated",
-                "expected",
-                "missing",
-                "declared-only",
-            ],
+            choices=list(EXISTENCE_VALUES),
         )
         group = p.add_mutually_exclusive_group()
         group.add_argument("--copy", action="store_true")
@@ -196,11 +231,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     p = sub.add_parser("inspect")
-    p.add_argument("--events", action="store_true")
-    p.add_argument("--crate", action="store_true")
-    p.add_argument("--graph", action="store_true")
-    p.add_argument("--html", action="store_true")
-    p.set_defaults(func=_run_inspect)
+    # One view per call: a shared 'format' dest makes conflicting selectors an
+    # argparse error and gives the previously-dead --crate a real meaning (the
+    # default crate view), instead of branch-order precedence among store_true flags.
+    fmt = p.add_mutually_exclusive_group()
+    fmt.add_argument("--events", dest="format", action="store_const", const="events")
+    fmt.add_argument("--crate", dest="format", action="store_const", const="crate")
+    fmt.add_argument("--graph", dest="format", action="store_const", const="graph")
+    fmt.add_argument("--html", dest="format", action="store_const", const="html")
+    p.set_defaults(func=_run_inspect, format="crate")
 
     p = sub.add_parser("redact")
     p.add_argument("--dry-run", action="store_true")
@@ -249,7 +288,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     for name in ["accept", "reject"]:
         p = sub.add_parser(name)
         p.add_argument("text", nargs="?", default="")
-        p.set_defaults(func=lambda a: commands.record_result(a.cmd == "accept", a.text))
+        # Bind the accept/reject boolean explicitly so the meaning doesn't depend on
+        # reverse-engineering the subcommand string from the top-level 'cmd' dest.
+        p.set_defaults(
+            func=lambda a: commands.record_result(a.accepted, a.text),
+            accepted=(name == "accept"),
+        )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.cmd not in {"start", "install-project"}:

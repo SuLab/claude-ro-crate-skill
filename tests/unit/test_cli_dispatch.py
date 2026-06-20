@@ -131,3 +131,30 @@ def test_decision_redaction_applied_preserves_categories(
     assert applied
     assert applied[-1]["payload"]["context"] == "human.decision"
     assert applied[-1]["payload"]["categories"]  # non-empty, not the old []
+
+
+def _visibility(state_dir: Path, event_type: str) -> str:
+    matches = [e for e in _events(state_dir) if e["event_type"] == event_type]
+    assert matches, f"no {event_type} event emitted"
+    return matches[-1]["visibility"]
+
+
+def test_note_private_forces_private_under_public_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --private now actually controls visibility (it was a no-op before): even when
+    # public_by_default=True, an explicit --private must produce a private note, and
+    # an unflagged note must follow the configured default.
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "demo", "--no-checkpoint"]) == 0
+    assert main(["config", "privacy.public_by_default", "true"]) == 0
+    state_dir = tmp_path / ".ro-crate-run"
+
+    assert main(["note", "secret detail", "--private"]) == 0
+    assert _visibility(state_dir, "human.note") == "private"
+
+    assert main(["note", "unflagged summary"]) == 0
+    assert _visibility(state_dir, "human.note") == "public"  # follows public_by_default
+
+    assert main(["decision", "ship it", "--private"]) == 0
+    assert _visibility(state_dir, "human.decision") == "private"

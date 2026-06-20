@@ -7,8 +7,11 @@ serialized and parsed by hand in ``state.py`` rather than via a schema library.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+from .constants import BYTES_PER_MB
 
 JsonDict = dict[str, Any]
 
@@ -34,11 +37,24 @@ class FilePolicy:
     max_log_size_mb: int = 10
     max_file_size_mb: int = 100
 
+    def max_file_bytes(self) -> int:
+        """The file-copy size gate in bytes (``max_file_size_mb`` converted from MB)."""
+        return self.max_file_size_mb * BYTES_PER_MB
+
+    def max_log_bytes(self) -> int:
+        """The log/sidecar-copy size gate in bytes (``max_log_size_mb`` converted from MB)."""
+        return self.max_log_size_mb * BYTES_PER_MB
+
 
 @dataclass
 class HashPolicy:
     max_file_size_mb: int = 100
     hash_large_files: bool = False
+
+    def max_hash_bytes(self) -> int:
+        """The hash size gate in bytes: ``hash_large_files`` lifts the cap (``sys.maxsize``
+        = hash files of ANY size); otherwise ``max_file_size_mb`` converted from MB."""
+        return sys.maxsize if self.hash_large_files else self.max_file_size_mb * BYTES_PER_MB
 
 
 @dataclass
@@ -80,7 +96,6 @@ class RemoteJournalConfig:
 
 @dataclass
 class RcrConfig:
-    schema_version: str = "1.0.0"
     mode: str = "monitored"
     default_profile: str = "process"
     project_name: Optional[str] = None
@@ -128,7 +143,6 @@ class RcrState:
     created_at: str
     updated_at: str
     profile_uri: str
-    schema_version: str = "1.0.0"
     description: Optional[str] = None
     session_id: Optional[str] = None
     sequence: int = 0
@@ -148,7 +162,6 @@ class RcrState:
     declared_outputs: list[JsonDict] = field(default_factory=list)
     known_outputs: list[JsonDict] = field(default_factory=list)
     known_software: list[JsonDict] = field(default_factory=list)
-    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -210,6 +223,9 @@ class ValidationFinding:
     code: str
     message: str
     path: str = ""
+    # Producing checker states its intent directly; the validator reads this
+    # instead of recovering severity by string-matching codes.
+    severity: str = "error"
 
 
 @dataclass
@@ -244,6 +260,23 @@ class CommandRecord:
 
 
 @dataclass
+class AgentActivity:
+    # The Claude Code agent's own actions are treated as the workflow.
+    # Each list is projected from the corresponding journal events.
+    file_actions: list[JsonDict] = field(default_factory=list)      # file.created/modified/changed/deleted
+    raw_commands: list[JsonDict] = field(default_factory=list)      # substantive raw Bash (tool.completed)
+    subagents: list[JsonDict] = field(default_factory=list)         # agent.task.* / agent.subagent.*
+    blocked_actions: list[JsonDict] = field(default_factory=list)   # tool.blocked / permission.denied
+    prompts: list[JsonDict] = field(default_factory=list)           # human.prompt
+    tool_uses: list[JsonDict] = field(default_factory=list)         # other tool.completed (Read/Grep/MCP/...)
+    housekeeping: list[JsonDict] = field(default_factory=list)      # cwd.changed / worktree.* / compaction.*
+    # Human decision points captured via PostToolUse on AskUserQuestion / Exit/EnterPlanMode.
+    # Each dict: {"sequence": int, "timestamp": str, "tool": str, "question": str|None,
+    #             "options": list[str], "answer": str|None, "plan": str|None}.
+    tool_decisions: list[JsonDict] = field(default_factory=list)
+
+
+@dataclass
 class RunModel:
     run_id: str
     title: str
@@ -274,19 +307,7 @@ class RunModel:
     environment: JsonDict = field(default_factory=dict)
     containers: list[JsonDict] = field(default_factory=list)
     dependencies: list[JsonDict] = field(default_factory=list)
-    # The Claude Code agent's own actions are treated as the workflow.
-    # Each list is projected from the corresponding journal events.
-    file_actions: list[JsonDict] = field(default_factory=list)      # file.created/modified/changed/deleted
-    raw_commands: list[JsonDict] = field(default_factory=list)      # substantive raw Bash (tool.completed)
-    subagents: list[JsonDict] = field(default_factory=list)         # agent.task.* / agent.subagent.*
-    blocked_actions: list[JsonDict] = field(default_factory=list)   # tool.blocked / permission.denied
-    prompts: list[JsonDict] = field(default_factory=list)           # human.prompt
-    tool_uses: list[JsonDict] = field(default_factory=list)         # other tool.completed (Read/Grep/MCP/...)
-    housekeeping: list[JsonDict] = field(default_factory=list)      # cwd.changed / worktree.* / compaction.*
-    # Human decision points captured via PostToolUse on AskUserQuestion / Exit/EnterPlanMode.
-    # Each dict: {"sequence": int, "timestamp": str, "tool": str, "question": str|None,
-    #             "options": list[str], "answer": str|None, "plan": str|None}.
-    tool_decisions: list[JsonDict] = field(default_factory=list)
+    agent_activity: AgentActivity = field(default_factory=AgentActivity)
 
 
 def strip_none(value: Any) -> Any:

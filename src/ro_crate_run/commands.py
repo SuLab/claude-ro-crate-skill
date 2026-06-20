@@ -8,7 +8,6 @@ import json
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -16,14 +15,15 @@ from typing import Any, cast
 
 from . import __version__
 from .config import default_config
-from .constants import CONTAINER_MANIFESTS, DEPENDENCY_MANIFESTS
+from .constants import BYTES_PER_MB
 from .context import ProjectContext
 from .export import finalize
-from .fs import sha256_file
+from .fs import bare_sha256, sha256_file
 from .git import observe_git_state
 from .journal import EventWriter
 from .materialize.builder import checkpoint
 from .models import RcrState
+from .oci import parse_image_ref
 from .recovery import ensure_recovered, is_active_run, recover_state
 from .redact import redact_run
 from .redaction import Redactor, redaction_event_payload
@@ -35,6 +35,7 @@ from .signing import (
     signing_available,
     verify_manifest_signature,
 )
+from .software_probe import classify_existence, probe_software, scan_lockfiles
 from .state import (
     detect_output_changes,
     ensure_runtime_dirs,
@@ -48,6 +49,14 @@ from .state import (
     write_state,
 )
 from .validation.validator import validate_run
+
+# Backwards-compatible aliases: the OCI/probe/scan/classify helpers were relocated
+# to focused modules (oci.py, software_probe.py). They are re-exported under their
+# original private names so callers that import them from here keep working unchanged.
+_parse_image_ref = parse_image_ref
+_probe_software = probe_software
+_scan_lockfiles = scan_lockfiles
+_classify_existence = classify_existence
 
 
 def _bootstrap_run(
@@ -208,6 +217,7 @@ def auto_start_run(env: dict[str, str] | None = None) -> bool:
 
 
 def resume() -> int:
+    """Resume an active run: recover state from the journal, emit run.resumed, print status."""
     ctx = ProjectContext.from_cwd()
     recover_state(ctx.state_dir, active_run=True)
     EventWriter(ctx.state_dir).append(
@@ -219,6 +229,7 @@ def resume() -> int:
 
 
 def status(json_output: bool = False) -> int:
+    """Print the run's status (text or JSON) after recovery and a dirty-flag refresh."""
     ctx = ProjectContext.from_cwd()
     from .recovery import ensure_recovered
 
@@ -292,6 +303,7 @@ def _print_status(state_dir: Path, *, json_output: bool = False) -> None:
 
 
 def note(text: str, public: bool = False) -> int:
+    """Record a human note: redact the text, emit human.note (+ redaction.applied if redacted)."""
     ctx = ProjectContext.from_cwd()
     result = Redactor.for_state_dir(ctx.state_dir).redact_text(text)
     writer = EventWriter(ctx.state_dir)
@@ -313,6 +325,8 @@ def note(text: str, public: bool = False) -> int:
 
 
 def decision(text: str, rationale: str | None = None, public: bool = False) -> int:
+    """Record a human decision (+ optional rationale): redact, emit human.decision and,
+    when anything was redacted, a redaction.applied event."""
     ctx = ProjectContext.from_cwd()
     redactor = Redactor.for_state_dir(ctx.state_dir)
     text_result = redactor.redact_text(text)
@@ -351,8 +365,14 @@ def declare_io(
     visibility: str = "private",
     existence: str | None = None,
 ) -> int:
+    """Declare a run input/output: emit workflow.{input,output}.declared and update state.
+
+    Classifies the path's existence (unless given), hashes a local input file
+    (sha256 + size, suppressing the missing-input-hash warning), and records a
+    declared output as a known output for later change detection.
+    """
     ctx = ProjectContext.from_cwd()
-    existence_val = existence or _classify_existence(path, kind, required)
+    existence_val = existence or classify_existence(path, kind, required)
     payload: dict[str, Any] = {
         "path": path,
         "existence": existence_val,
@@ -363,12 +383,12 @@ def declare_io(
     if kind == "input" and existence_val.startswith("observed"):
         local_path = Path(path)
         cfg = load_config(ctx.state_dir)
-        max_bytes = cfg.hash_policy.max_file_size_mb * 1024 * 1024
+        max_bytes = cfg.hash_policy.max_file_size_mb * BYTES_PER_MB
         if local_path.exists() and local_path.is_file():
             if local_path.stat().st_size <= max_bytes:
                 input_digest = sha256_file(local_path)
                 if input_digest:
-                    payload["sha256"] = input_digest.replace("sha256:", "")
+                    payload["sha256"] = bare_sha256(input_digest)
                     payload["size"] = local_path.stat().st_size
     if role:
         payload["role"] = role
@@ -405,21 +425,11 @@ def _refresh_run_dirty(state_dir: Path) -> None:
     if state.dirty:
         return
     cfg = load_config(state_dir)
-    max_bytes = cfg.hash_policy.max_file_size_mb * 1024 * 1024
+    max_bytes = cfg.hash_policy.max_file_size_mb * BYTES_PER_MB
     chk = state.last_checkpoint
     version_changed = bool(chk and chk.materializer_version not in {None, __version__})
     if version_changed or detect_output_changes(state_dir, state, max_bytes):
         update_state(state_dir, lambda s: setattr(s, "dirty", True))
-
-
-def _classify_existence(path: str, kind: str, required: bool) -> str:
-    if "://" in path:
-        return "observed remote"
-    if Path(path).exists():
-        return "observed local"
-    if kind == "output":
-        return "expected" if required else "declared-only"
-    return "missing" if required else "declared-only"
 
 
 def parameter(
@@ -431,6 +441,11 @@ def parameter(
     connect_from: str | None = None,
     connect_to: str | None = None,
 ) -> int:
+    """Declare a workflow parameter: emit workflow.parameter.declared.
+
+    When both ``connect_from`` and ``connect_to`` are given, records a
+    ParameterConnection linking an upstream output to a downstream input.
+    """
     ctx = ProjectContext.from_cwd()
     payload: dict[str, object] = {"name": name, "value": value}
     if formal_parameter:
@@ -450,26 +465,13 @@ def parameter(
     return 0
 
 
-def _parse_image_ref(ref: str) -> tuple[str, str, str, str]:
-    """Split an OCI image reference into (registry, image, tag, digest)."""
-    registry = ""
-    digest = ""
-    if "@" in ref:
-        ref, digest = ref.split("@", 1)
-    if "/" in ref:
-        first, rest = ref.split("/", 1)
-        # A leading segment with a dot, a port, or "localhost" is a registry host.
-        if "." in first or ":" in first or first == "localhost":
-            registry, ref = first, rest
-    tag = ""
-    if ":" in ref:
-        ref, tag = ref.rsplit(":", 1)
-    return registry, ref, tag, digest
-
-
 def container(ref: str, digest: str | None = None) -> int:
+    """Record an observed container image: emit container.observed from a parsed OCI ref.
+
+    An explicit ``--digest`` overrides any ``@sha256:...`` digest in the reference.
+    """
     ctx = ProjectContext.from_cwd()
-    registry, image, tag, ref_digest = _parse_image_ref(ref)
+    registry, image, tag, ref_digest = parse_image_ref(ref)
     payload = {
         "registry": registry,
         "image": image,
@@ -487,8 +489,13 @@ def container(ref: str, digest: str | None = None) -> int:
 
 
 def software(command_or_name: str, version: str | None, software_type: str | None) -> int:
+    """Record observed software: probe its version, emit software.observed, scan lockfiles.
+
+    Appends the software to known_software (clearing the missing-software gap) and
+    scans the project for dependency/workflow manifests via scan_lockfiles.
+    """
     ctx = ProjectContext.from_cwd()
-    probed_version, executable_path = _probe_software(command_or_name)
+    probed_version, executable_path = probe_software(command_or_name)
     payload = {
         "name": command_or_name,
         "command": command_or_name,
@@ -499,64 +506,68 @@ def software(command_or_name: str, version: str | None, software_type: str | Non
         payload["executable_path"] = executable_path
     EventWriter(ctx.state_dir).append("software.observed", payload, source_kind="human_cli")
     update_state(ctx.state_dir, lambda s: s.known_software.append(payload))
-    _scan_lockfiles(ctx)
+    scan_lockfiles(ctx)
     return 0
 
 
-def _scan_lockfiles(ctx: ProjectContext) -> None:
-    writer = EventWriter(ctx.state_dir)
-    # Dependency/environment manifests matched by exact filename (lockfiles, package
-    # manifests, workflow definitions, container files); Dockerfile/Containerfile are
-    # recorded as kind="container", the rest as kind="lockfile".
-    for name in (*DEPENDENCY_MANIFESTS, "Dockerfile", "Containerfile"):
-        candidate = ctx.project_dir / name
-        if candidate.exists() and candidate.is_file():
-            kind = "container" if name in CONTAINER_MANIFESTS else "lockfile"
-            writer.append(
-                "dependency.lockfile.observed",
-                {
-                    "path": name,
-                    "kind": kind,
-                    "file_record": sha256_file(candidate),
-                },
-                source_kind="human_cli",
-            )
-    # CWL/WDL workflow definition files (scanned for *.cwl, *.wdl).
-    for pattern, wf_kind in (("*.cwl", "cwl-workflow"), ("*.wdl", "wdl-workflow")):
-        for candidate in ctx.project_dir.glob(pattern):
-            if candidate.is_file():
-                writer.append(
-                    "dependency.lockfile.observed",
-                    {
-                        "path": str(candidate.relative_to(ctx.project_dir)),
-                        "kind": wf_kind,
-                        "file_record": sha256_file(candidate),
-                    },
-                    source_kind="human_cli",
-                )
+# The two `phase` sub-actions and the in-band completion flag. cli.py declares
+# `phase` with nargs='+' and hands the raw token list here (it cannot host a real
+# sub-subparser without the skill's `rcr phase ...` invocations changing), so the
+# tokens are parsed here. These literals ARE the external CLI contract — the skill
+# invokes `rcr phase <name>`; do not rename them.
+_PHASE_COMPLETE_ACTION = "complete"
+_PHASE_COMPLETE_CURRENT_FLAG = "--complete-current"
+
+
+def _phase_complete(writer: EventWriter, fallback_phase: str | None, name: str | None) -> None:
+    """Emit workflow.phase.completed for `phase complete [name]` (name defaults to current).
+
+    A positional name is used verbatim when given; only its absence falls back to
+    the current phase, then a literal "phase".
+    """
+    resolved = name if name is not None else fallback_phase or "phase"
+    writer.append(
+        "workflow.phase.completed", {"name": resolved}, source_kind="human_cli", phase_id=resolved
+    )
+
+
+def _phase_start(
+    writer: EventWriter, current_phase: str | None, name: str, *, complete_current: bool
+) -> None:
+    """Emit workflow.phase.started, first completing the current phase when requested."""
+    if complete_current and current_phase:
+        writer.append(
+            "workflow.phase.completed",
+            {"name": current_phase},
+            source_kind="human_cli",
+        )
+    writer.append(
+        "workflow.phase.started", {"name": name}, source_kind="human_cli", phase_id=name
+    )
 
 
 def phase(args: list[str]) -> int:
+    """Start or complete a workflow phase and update current_phase_id.
+
+    Accepts the same CLI tokens as before (cli.py forwards the raw nargs='+' list):
+    `phase <name> [--complete-current]` starts a phase; `phase complete [name]`
+    completes one. Sub-action dispatch mirrors `step`'s structure without changing
+    the external token contract.
+    """
     ctx = ProjectContext.from_cwd()
     writer = EventWriter(ctx.state_dir)
     state = load_state(ctx.state_dir)
     new_phase: str | None
-    if args and args[0] == "complete":
-        name = args[1] if len(args) > 1 else state.current_phase_id or "phase"
-        writer.append(
-            "workflow.phase.completed", {"name": name}, source_kind="human_cli", phase_id=name
-        )
+    if args and args[0] == _PHASE_COMPLETE_ACTION:
+        _phase_complete(writer, state.current_phase_id, args[1] if len(args) > 1 else None)
         new_phase = None
     else:
         name = args[0]
-        if "--complete-current" in args and state.current_phase_id:
-            writer.append(
-                "workflow.phase.completed",
-                {"name": state.current_phase_id},
-                source_kind="human_cli",
-            )
-        writer.append(
-            "workflow.phase.started", {"name": name}, source_kind="human_cli", phase_id=name
+        _phase_start(
+            writer,
+            state.current_phase_id,
+            name,
+            complete_current=_PHASE_COMPLETE_CURRENT_FLAG in args,
         )
         new_phase = name
     update_state(ctx.state_dir, lambda s: setattr(s, "current_phase_id", new_phase))
@@ -570,6 +581,12 @@ def step(
     description: str | None = None,
     status_value: str = "completed",
 ) -> int:
+    """Start or end a workflow step and track current_step_id.
+
+    ``action="start"`` emits workflow.step.started and sets the current step;
+    ``action="end"`` emits a completed/failed/skipped event per ``status_value``
+    and clears the current step when it matches.
+    """
     ctx = ProjectContext.from_cwd()
     writer = EventWriter(ctx.state_dir)
     if action == "start":
@@ -595,6 +612,7 @@ def step(
 
 
 def run_command(argv: list[str], step_id: str | None, inputs: list[str], outputs: list[str]) -> int:
+    """Run a captured command via CommandRunner, recording its execution provenance."""
     ctx = ProjectContext.from_cwd()
     return CommandRunner(ctx.state_dir, ctx.project_dir).run(
         argv, step=step_id, inputs=inputs, outputs=outputs
@@ -602,6 +620,7 @@ def run_command(argv: list[str], step_id: str | None, inputs: list[str], outputs
 
 
 def do_checkpoint(profile: str = "auto") -> int:
+    """Checkpoint the run: materialize, write, and validate the crate for the given profile."""
     ctx = ProjectContext.from_cwd()
     return checkpoint(ctx.state_dir, requested_profile=profile)
 
@@ -707,6 +726,7 @@ def do_finalize(
 
 
 def do_redact(dry_run: bool, apply: bool, policy: str | None = None) -> int:
+    """Scan/redact secrets across the run; ``apply`` rewrites the journal in place (unless dry-run)."""
     ctx = ProjectContext.from_cwd()
     return redact_run(
         ctx.state_dir, apply=apply and not dry_run, policy=Path(policy) if policy else None
@@ -714,6 +734,10 @@ def do_redact(dry_run: bool, apply: bool, policy: str | None = None) -> int:
 
 
 def set_config(key: str, value: str) -> int:
+    """Set a config key (``section.field`` or top-level), validating it against the schema.
+
+    Rejects unknown keys/sections, persists config.json, and emits run.config.updated.
+    """
     from dataclasses import fields, is_dataclass
 
     ctx = ProjectContext.from_cwd()
@@ -755,6 +779,7 @@ def _coerce_config_value(value: str) -> Any:
 
 
 def abort(reason: str = "") -> int:
+    """Abort the run: emit the terminal run.aborted event with an optional reason."""
     ctx = ProjectContext.from_cwd()
     EventWriter(ctx.state_dir).append(
         "run.aborted", {"reason": reason}, source_kind="human_cli"
@@ -763,6 +788,8 @@ def abort(reason: str = "") -> int:
 
 
 def record_result(accepted: bool, text: str = "") -> int:
+    """Record a human accept/reject of a result: redact the note and emit the human.* event
+    (plus redaction.applied when anything was redacted)."""
     ctx = ProjectContext.from_cwd()
     result = Redactor.for_state_dir(ctx.state_dir).redact_text(text)
     context = "human.accepted_result" if accepted else "human.rejected_result"
@@ -784,11 +811,13 @@ def record_result(accepted: bool, text: str = "") -> int:
 
 
 def hash_path(path: str) -> int:
+    """Print the 'sha256:'-prefixed digest of a file at ``path``."""
     print(sha256_file(Path(path)))
     return 0
 
 
 def import_ro_crate(path: str) -> int:
+    """Import an existing RO-Crate: translate its entities into declared events on this run."""
     from .adapters.imports import import_existing_ro_crate
 
     ctx = ProjectContext.from_cwd()
@@ -815,20 +844,3 @@ def _package_version(package: str) -> str:
         return metadata.version(package)
     except metadata.PackageNotFoundError:
         return "unknown"
-
-
-def _probe_software(command_or_name: str) -> tuple[str | None, str | None]:
-    executable = shutil.which(command_or_name)
-    version = None
-    if executable:
-        proc = subprocess.run(
-            [executable, "--version"],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
-        output = (proc.stdout or proc.stderr).strip()
-        if output:
-            version = output.splitlines()[0]
-    return version, executable

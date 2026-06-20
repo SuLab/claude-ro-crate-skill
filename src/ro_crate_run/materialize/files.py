@@ -69,20 +69,21 @@ def _included_for_role(role: str, fp: FilePolicy) -> bool:
 
 def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> list[FilePlan]:
     fp = cfg.file_policy
-    max_bytes = fp.max_file_size_mb * 1024 * 1024
+    max_bytes = fp.max_file_bytes()
     plans: dict[str, FilePlan] = {}
 
     def _merge(new: FilePlan) -> FilePlan:
         """Combine a freshly-considered plan with any prior plan for the same file_id.
 
         A path can be considered more than once (e.g. declared via `rcr output` AND produced
-        as a command output). User-declared metadata (description/existence/role from an
-        explicit `rcr input/output`) takes precedence over inferred "Command output"
-        metadata, regardless of order — that is the completeness fix. But copy/included are
-        UNIONED so a genuinely-produced output's content is still captured even when the user
-        declared it by-reference (the default), and a sensitive plan stays sensitive (never
-        captured). Without the union a declared+produced output silently loses its bytes,
-        which would, e.g., defeat the public-export secret-scan gate.
+        as a command output). When a path is both user-declared and inferred, the explicit
+        `rcr input/output` metadata (description/existence/role) wins in either arrival order,
+        so an explicitly described input is never overwritten by the inferred "Command output"
+        description. But copy/included are UNIONED so a genuinely-produced output's content is
+        still captured even when the user declared it by-reference (the default), and a
+        sensitive plan stays sensitive (never captured). Without the union a declared+produced
+        output silently loses its bytes, which would, e.g., defeat the public-export
+        secret-scan gate.
         """
         old = plans.get(new.file_id)
         if old is None:
@@ -178,7 +179,7 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
     for command in model.commands:
         for out in command.outputs:
             consider(out, "output", None, {"path": out, "description": "Command output"})
-    for fa in model.file_actions:
+    for fa in model.agent_activity.file_actions:
         fa_path = str(fa.get("path", ""))
         if fa_path:
             consider(
@@ -195,7 +196,7 @@ def log_should_copy(rel: str, project_dir: Path, cfg: RcrConfig) -> bool:
     fp = cfg.file_policy
     if fp.include_logs == "never":
         return False
-    max_log_bytes = fp.max_log_size_mb * 1024 * 1024
+    max_log_bytes = fp.max_log_bytes()
     if max_log_bytes == 0:
         return False
     src = project_dir / rel

@@ -40,17 +40,17 @@ def test_new_event_rejects_null_payload_values() -> None:
 
 
 def test_actor_for_source_human_cli_is_person() -> None:
-    actor = actor_for_source("human_cli", "rcr")
+    actor = actor_for_source("human_cli")
     assert (actor.type, actor.id, actor.name) == ("Person", "actor:human", "Human operator")
 
 
 def test_actor_for_source_claude_hook_is_claude_code() -> None:
-    actor = actor_for_source("claude_hook", "rocrate_post_tool_use.py")
+    actor = actor_for_source("claude_hook")
     assert (actor.type, actor.id) == ("SoftwareApplication", "actor:claude-code")
 
 
 def test_actor_for_source_default_is_rcr() -> None:
-    actor = actor_for_source("materializer", "rcr")
+    actor = actor_for_source("materializer")
     assert (actor.type, actor.id) == ("SoftwareApplication", "actor:rcr")
 
 

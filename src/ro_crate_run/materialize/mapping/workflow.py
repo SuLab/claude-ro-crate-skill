@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from ro_crate_run import constants
-from ro_crate_run.events import engine_actor_id
+from ro_crate_run.events import crate_actor_id, engine_actor_id
 from ro_crate_run.ids import IdMap, file_ref, software_entity_id
 from ro_crate_run.models import CommandRecord, RunModel
 
+from ._helpers import STEP_STATUS_URI, ref
 from .parameters import workflow_formal_parameters
 
 
@@ -48,18 +49,18 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
         # Reference the engine SoftwareApplication (#actor/engine/<engine>) build_actors emits,
         # so it is not an orphan; fall back to a plain string for an unknown engine.
         "programmingLanguage": (
-            {"@id": engine_actor_id(str(model.workflow["engine"]))}
+            ref(engine_actor_id(str(model.workflow["engine"])))
             if model.workflow.get("engine") and model.workflow["engine"] != "unknown"
             else model.workflow.get("engine", "workflow")
         ),
     }
     input_refs = [
-        {"@id": formal_param_map[str(item.get("path", ""))]}
+        ref(formal_param_map[str(item.get("path", ""))])
         for item in model.inputs
         if str(item.get("path", "")) in formal_param_map
     ]
     output_refs = [
-        {"@id": formal_param_map[str(item.get("path", ""))]}
+        ref(formal_param_map[str(item.get("path", ""))])
         for item in model.outputs
         if str(item.get("path", "")) in formal_param_map
     ]
@@ -69,14 +70,14 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
         entity["output"] = output_refs
     if model.steps:
         entity["step"] = [
-            {"@id": idmap.entity_for_step(step_id)} for step_id in sorted(model.steps)
+            ref(idmap.entity_for_step(step_id)) for step_id in sorted(model.steps)
         ]
     # Provenance 0.5 MUST — the ComputationalWorkflow's hasPart references the @ids of the
     # orchestrated tools (the SoftwareApplications the steps invoke + the engine). Every ref
     # MUST resolve, so we only list ids that build_software / build_actors actually emit.
     tool_ids = _orchestrated_tool_ids(model)
     if tool_ids:
-        entity["hasPart"] = [{"@id": tid} for tid in tool_ids]
+        entity["hasPart"] = [ref(tid) for tid in tool_ids]
     return [entity]
 
 
@@ -122,7 +123,8 @@ def build_workflow_action(
     """
     if not model.workflow:
         return []
-    if not (model.commands or model.file_actions or model.raw_commands):
+    activity = model.agent_activity
+    if not (model.commands or activity.file_actions or activity.raw_commands):
         return []
     proj = Path(project_dir)
     failed = any(c.terminal_status == "failed" for c in model.commands)
@@ -135,17 +137,17 @@ def build_workflow_action(
         start_time = model.commands[0].started_at
         end_time = model.commands[-1].ended_at or model.commands[-1].started_at
         # `rcr run` work is recorded by the rcr materializer.
-        agent_id = "#actor/rcr"
+        agent_id = crate_actor_id("rcr")
     else:
         # Edit-only session: the Claude agent performed the work directly.
         stamps = [
             str(item.get("timestamp", ""))
-            for item in (*model.file_actions, *model.raw_commands)
+            for item in (*activity.file_actions, *activity.raw_commands)
             if item.get("timestamp")
         ]
         start_time = min(stamps) if stamps else model.created_at
         end_time = max(stamps) if stamps else model.updated_at
-        agent_id = "#actor/claude-code"
+        agent_id = crate_actor_id("claude-code")
 
     wf_path = str(model.workflow.get("path", ""))
     action: dict[str, Any] = {
@@ -155,9 +157,9 @@ def build_workflow_action(
         "description": "Workflow-level execution action.",
         "startTime": start_time,
         "endTime": end_time,
-        "actionStatus": {"@id": workflow_status},
-        "agent": {"@id": agent_id},
-        "instrument": {"@id": wf_id},
+        "actionStatus": ref(workflow_status),
+        "agent": ref(agent_id),
+        "instrument": ref(wf_id),
         "object": [
             file_ref(Path(str(item["path"])), proj)
             for item in model.inputs
@@ -194,19 +196,11 @@ def build_workflow_timeline(
             "@id": f"#wfcontrol/{position}",
             "@type": "ControlAction",
             "name": f"Step {position}",
-            "instrument": {"@id": step_id},
-            "object": {"@id": action_id},
+            "instrument": ref(step_id),
+            "object": ref(action_id),
         })
-        step_refs.append({"@id": step_id})
+        step_refs.append(ref(step_id))
     return entities, step_refs
-
-
-_STEP_STATUS_URI = {
-    "started": constants.ACTION_STATUS_ACTIVE,
-    "completed": constants.ACTION_STATUS_COMPLETED,
-    "failed": constants.ACTION_STATUS_FAILED,
-    "skipped": constants.ACTION_STATUS_FAILED,
-}
 
 
 def _step_fallback_workexample(model: RunModel) -> str | None:
@@ -258,22 +252,20 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
         }
         step_cmd: CommandRecord | None = cmd_by_step.get(step_id)
         if step_cmd and step_cmd.argv:
-            howto["workExample"] = {"@id": software_entity_id(os.path.basename(step_cmd.argv[0]))}
+            howto["workExample"] = ref(software_entity_id(os.path.basename(step_cmd.argv[0])))
         elif fallback_workexample is not None:
-            howto["workExample"] = {"@id": fallback_workexample}
+            howto["workExample"] = ref(fallback_workexample)
         entities.append(howto)
         if step_cmd:
             entities.append(
                 {
                     "@id": idmap.entity_for_event(f"control:{step_cmd.command_id}", "control"),
                     "@type": "ControlAction",
-                    "instrument": {"@id": step_entity_id},
-                    "object": {"@id": step_cmd.action_id},
-                    "actionStatus": {
-                        "@id": _STEP_STATUS_URI.get(
-                            status, constants.ACTION_STATUS_COMPLETED
-                        )
-                    },
+                    "instrument": ref(step_entity_id),
+                    "object": ref(step_cmd.action_id),
+                    "actionStatus": ref(
+                        STEP_STATUS_URI.get(status, constants.ACTION_STATUS_COMPLETED)
+                    ),
                 }
             )
     return entities

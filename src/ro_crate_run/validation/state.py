@@ -13,36 +13,51 @@ from ro_crate_run.models import ValidationFinding
 from .context import ValidationContext
 
 
+def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
+    """Construct an L1 (``state``) error finding; the level is bound here so it is
+    not repeated on every emission in this checker. The two advisory findings
+    (``open_phase``/``open_step``) are constructed inline with ``severity``."""
+    return ValidationFinding("state", code, message, path)
+
+
 def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     state, events = ctx.state, ctx.events
 
     for event in events:
         if event.get("run_id") != state.run_id:
-            findings.append(ValidationFinding("state", "run_id_mismatch", "Event run_id does not match state"))
+            findings.append(_finding("run_id_mismatch", "Event run_id does not match state"))
             break
 
     if events:
         journal_hash = events[-1].get("event_hash")
         if state.last_event_hash != journal_hash:
             findings.append(
-                ValidationFinding("state", "state_hash_mismatch", "state.last_event_hash does not match journal")
+                _finding("state_hash_mismatch", "state.last_event_hash does not match journal")
             )
-        if state.sequence != len(events):
+        # state.sequence tracks the LAST event's sequence field (the invariant
+        # journal.py/recovery.py maintain), not the line count — comparing against the
+        # count would falsely flag the instant sequences ever start above 1 or gap.
+        last_sequence = int(events[-1].get("sequence", 0))
+        if state.sequence != last_sequence:
             findings.append(
-                ValidationFinding("state", "state_sequence_mismatch", "state.sequence does not match journal length")
+                _finding("state_sequence_mismatch", "state.sequence does not match journal")
             )
 
     if state.current_phase_id:
-        findings.append(ValidationFinding("state", "open_phase", f"Run has open phase {state.current_phase_id}"))
+        findings.append(ValidationFinding(
+            "state", "open_phase", f"Run has open phase {state.current_phase_id}", severity="warning"
+        ))
     if state.current_step_id:
-        findings.append(ValidationFinding("state", "open_step", f"Run has open step {state.current_step_id}"))
+        findings.append(ValidationFinding(
+            "state", "open_step", f"Run has open step {state.current_step_id}", severity="warning"
+        ))
 
     lc = state.last_checkpoint
     if lc is not None:
         if lc.materialized_through_sequence > state.sequence or lc.event_sequence > state.sequence:
             findings.append(
-                ValidationFinding("state", "checkpoint_sequence_invalid", "last_checkpoint sequence exceeds journal")
+                _finding("checkpoint_sequence_invalid", "last_checkpoint sequence exceeds journal")
             )
 
     # Dirty-flag accuracy: only meaningful when a prior checkpoint exists.
@@ -55,15 +70,11 @@ def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
         )
         if pending and not state.dirty:
             findings.append(
-                ValidationFinding(
-                    "state", "dirty_flag_inaccurate", "Uncheckpointed events exist but dirty is false"
-                )
+                _finding("dirty_flag_inaccurate", "Uncheckpointed events exist but dirty is false")
             )
         if not pending and state.dirty and lc.validation_status != "failed":
             findings.append(
-                ValidationFinding(
-                    "state", "dirty_flag_inaccurate", "No pending events but dirty is true"
-                )
+                _finding("dirty_flag_inaccurate", "No pending events but dirty is true")
             )
 
     id_map_path = ctx.state_dir / "id-map.json"
@@ -71,11 +82,11 @@ def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
         try:
             id_map = json.loads(id_map_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            findings.append(ValidationFinding("state", "id_map_invalid", f"id-map.json is not valid JSON: {exc}"))
+            findings.append(_finding("id_map_invalid", f"id-map.json is not valid JSON: {exc}"))
         else:
             for key, default in new_id_map().items():
                 if not isinstance(default, dict):
                     continue
                 if key in id_map and not isinstance(id_map[key], dict):
-                    findings.append(ValidationFinding("state", "id_map_invalid", f"id-map.{key} must be an object"))
+                    findings.append(_finding("id_map_invalid", f"id-map.{key} must be an object"))
     return findings

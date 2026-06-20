@@ -8,9 +8,18 @@ from pathlib import Path
 engine_name = "nextflow"
 homepage = "https://www.nextflow.io/"
 
+# Path patterns that name a Nextflow workflow definition (read by the registry seam).
+SUFFIXES: tuple[str, ...] = (".nf",)
+FILENAMES: tuple[str, ...] = ("nextflow.config",)
+
 
 def identify(path: Path) -> dict[str, object] | None:
-    if path.suffix != ".nf" and path.name != "nextflow.config":
+    if path.suffix not in SUFFIXES and path.name not in FILENAMES:
         return None
-    steps = re.findall(r"process\s+(\w+)\s*\{", path.read_text())
-    return {"engine": "nextflow", "path": str(path), "steps": steps}
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        # Unreadable / non-UTF-8 file: skip rather than crash materialization.
+        return None
+    steps = re.findall(r"process\s+(\w+)\s*\{", text)
+    return {"engine": engine_name, "path": str(path), "steps": steps}

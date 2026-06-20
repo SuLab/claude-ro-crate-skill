@@ -13,16 +13,28 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from filelock import FileLock
-
-from .events import compute_event_hash, dump_event_line
+from .events import dump_event_line, event_from_dict, event_to_dict
 from .journal import EventWriter
-from .redaction import Redactor, scan_file_for_secrets
-from .state import load_state, read_events, write_state
+from .models import RcrEvent
+from .redaction import Redactor, iter_regular_files, scan_file_for_secrets
+from .state import read_events
 from .time import utc_now, utc_now_compact
 
 
 def redact_run(state_dir: Path, *, apply: bool = False, policy: Path | str | None = None) -> int:
+    """Scan the project for secrets and, with ``apply``, rewrite them out.
+
+    Always scans the candidate files (journal + captured commands/logs/crate),
+    prints a JSON report, and returns:
+
+    - ``0`` when nothing matches (status ``clean``);
+    - ``1`` when secrets are found but ``apply`` is ``False`` (report only);
+    - ``0`` after a successful ``apply`` that redacts the journal and text files.
+
+    Applying re-links the whole event chain (via :meth:`EventWriter.rewrite_chain`)
+    and emits ``redaction.applied`` (or ``redaction.failed`` if a rewrite raises,
+    which is then re-raised). ``policy`` adds extra patterns from a JSON file.
+    """
     from .state import load_config
 
     cfg = load_config(state_dir)
@@ -87,42 +99,41 @@ def _redact_text_files(state_dir: Path, redactor: Redactor) -> None:
 
 
 def _redact_event_journal(state_dir: Path, redactor: Redactor) -> None:
+    """Redact every journaled event and re-link the whole chain.
+
+    Reads the journal, masks each event's secrets, flags changed events
+    ``redacted``, then hands the events to :meth:`EventWriter.rewrite_chain`,
+    which owns the lock, atomic rewrite, hash re-linking, and state bump. The
+    pre-redaction journal is preserved as a timestamped backup, and the final
+    re-linked chain is also dropped into ``reports/redacted-events.ndjson``.
+    """
     journal_path = state_dir / "events.ndjson"
-    # Rewriting the journal recomputes the entire hash chain, so it must be exclusive
-    # with appends and recovery — hold the append lock for the whole read-modify-write.
-    with FileLock(str(state_dir / "lock")):
-        events = read_events(state_dir)
-        if not events:
-            return
-        backup = state_dir / f"events.ndjson.pre-redaction-{utc_now_compact()}"
-        backup.write_text(journal_path.read_text(encoding="utf-8"), encoding="utf-8")
-        previous = None
-        redacted_events: list[dict[str, Any]] = []
-        for sequence, event in enumerate(events, start=1):
-            redacted_event = cast(dict[str, Any], redactor.redact_value(event)[0])
-            if redacted_event != event:
-                redacted_event["redacted"] = True
-            redacted_event["sequence"] = sequence
-            redacted_event["previous_event_hash"] = previous
-            redacted_event["event_hash"] = None
-            redacted_event["timestamp"] = redacted_event.get("timestamp") or utc_now()
-            redacted_event["event_hash"] = compute_event_hash(redacted_event)
-            previous = redacted_event["event_hash"]
-            redacted_events.append(redacted_event)
-        payload = "".join(dump_event_line(event) for event in redacted_events)
-        report_path = state_dir / "reports" / "redacted-events.ndjson"
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(payload, encoding="utf-8")
-        # Atomic rewrite (tmp + replace) so a crash mid-write cannot truncate/corrupt the
-        # authoritative journal, matching state.py::write_state.
-        journal_tmp = journal_path.with_suffix(".ndjson.tmp")
-        journal_tmp.write_text(payload, encoding="utf-8")
-        journal_tmp.replace(journal_path)
-        state = load_state(state_dir)
-        state.sequence = int(redacted_events[-1]["sequence"])
-        state.last_event_hash = str(redacted_events[-1]["event_hash"])
-        state.dirty = True
-        write_state(state_dir, state)
+    raw_events = read_events(state_dir)
+    if not raw_events:
+        return
+    backup = state_dir / f"events.ndjson.pre-redaction-{utc_now_compact()}"
+    backup.write_text(journal_path.read_text(encoding="utf-8"), encoding="utf-8")
+    events: list[RcrEvent] = []
+    for sequence, raw in enumerate(raw_events, start=1):
+        redacted = cast(dict[str, Any], redactor.redact_value(raw)[0])
+        if redacted != raw:
+            redacted["redacted"] = True
+        redacted["sequence"] = sequence
+        # Defensive: a missing/blank timestamp would break event reconstruction;
+        # stored events always carry one, but never persist a null.
+        redacted["timestamp"] = redacted.get("timestamp") or utc_now()
+        events.append(event_from_dict(redacted))
+    # rewrite_chain re-links previous/event hashes in place under the append lock,
+    # atomically rewrites the journal, and bumps derived state (dirty stays True
+    # because the chain's final event maps to dirty_effect "set").
+    EventWriter(state_dir).rewrite_chain(events)
+    # Mirror the now-re-linked chain into the reports dir for inspection.
+    report_path = state_dir / "reports" / "redacted-events.ndjson"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        "".join(dump_event_line(event_to_dict(event)) for event in events),
+        encoding="utf-8",
+    )
 
 
 def _candidate_files(state_dir: Path) -> list[Path]:
@@ -130,7 +141,7 @@ def _candidate_files(state_dir: Path) -> list[Path]:
     for rel in ["commands", "logs", "ro-crate"]:
         root = state_dir / rel
         if root.exists():
-            paths.extend(path for path in root.rglob("*") if path.is_file())
+            paths.extend(iter_regular_files(root))
     return paths
 
 

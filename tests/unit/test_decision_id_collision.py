@@ -42,7 +42,7 @@ def test_human_and_tool_decision_same_counter_do_not_merge(
         {"text": "ship it", "rationale": "looks good", "visibility": "public"}
     ]
     # A tool decision whose event sequence collides with that index (1).
-    model.tool_decisions = [  # type: ignore[attr-defined]
+    model.agent_activity.tool_decisions = [  # type: ignore[attr-defined]
         {
             "sequence": 1,
             "timestamp": "2026-06-20T00:00:00Z",

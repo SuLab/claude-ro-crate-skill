@@ -13,10 +13,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..constants import BYTES_PER_MB
 from ..models import PrivacyFinding, ValidationFinding
 from ..redaction import Redactor, scan_file_for_secrets
 from ..state import read_events_safe
 from .context import ValidationContext
+
+
+def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
+    """Construct an L5 (``privacy``) finding; the level is bound here so it is not
+    repeated on every emission. Every privacy finding is an error — the export
+    gate fails closed — so the default ``severity`` applies."""
+    return ValidationFinding("privacy", code, message, path)
 
 
 def check_public_export_payload(
@@ -64,9 +72,7 @@ def scan_crate_secrets(crate_dir: Path, redactor: Redactor) -> list[ValidationFi
         # be read at all, so a non-UTF-8 file never makes the gate fail open.
         if scan_file_for_secrets(path, redactor):
             rel = path.relative_to(crate_dir).as_posix()
-            findings.append(
-                ValidationFinding("privacy", "secret_pattern", f"Secret pattern found in {rel}", rel)
-            )
+            findings.append(_finding("secret_pattern", f"Secret pattern found in {rel}", rel))
     return findings
 
 
@@ -78,8 +84,7 @@ def journal_findings(
         rel = journal.relative_to(crate_dir).as_posix()
         if not include_event_journal:
             findings.append(
-                ValidationFinding(
-                    "privacy",
+                _finding(
                     "event_journal_in_public_export",
                     f"Event journal present in public crate without include_event_journal: {rel}",
                     rel,
@@ -87,8 +92,7 @@ def journal_findings(
             )
         if not include_prompts and _journal_has_prompt(journal):
             findings.append(
-                ValidationFinding(
-                    "privacy",
+                _finding(
                     "raw_prompt_in_public_export",
                     f"Raw prompt present in public crate without include_prompts: {rel}",
                     rel,
@@ -125,8 +129,7 @@ def source_diff_findings(
         if is_diff:
             if not include_git_diff_public:
                 findings.append(
-                    ValidationFinding(
-                        "privacy",
+                    _finding(
                         "git_diff_in_public_export",
                         f"Git diff included without include_git_diff_public: {rel}",
                         rel,
@@ -139,8 +142,7 @@ def source_diff_findings(
             rel == root or rel.startswith(root + "/") for root in roots
         ):
             findings.append(
-                ValidationFinding(
-                    "privacy",
+                _finding(
                     "source_code_in_public_export",
                     f"Source code included without include_source_code_public: {rel}",
                     rel,
@@ -164,8 +166,7 @@ def env_findings(crate_dir: Path, *, allowlist: list[str]) -> list[ValidationFin
         for key in sorted(environment):
             if key not in allowed:
                 findings.append(
-                    ValidationFinding(
-                        "privacy",
+                    _finding(
                         "env_var_outside_allowlist",
                         f"Environment variable outside allowlist in public crate: {key}",
                         f"{rel}::{key}",
@@ -179,14 +180,13 @@ def log_findings(
 ) -> list[ValidationFinding]:
     if include_full_logs:
         return []
-    limit = max_log_size_mb * 1024 * 1024
+    limit = max_log_size_mb * BYTES_PER_MB
     findings: list[ValidationFinding] = []
     for log in sorted(crate_dir.rglob("logs/*.txt")):
         if log.is_file() and log.stat().st_size > limit:
             rel = log.relative_to(crate_dir).as_posix()
             findings.append(
-                ValidationFinding(
-                    "privacy",
+                _finding(
                     "full_log_in_public_export",
                     f"Oversized log in public crate without include_full_logs: {rel}",
                     rel,
@@ -226,9 +226,7 @@ def public_export_findings(ctx: ValidationContext) -> list[ValidationFinding]:
         # Reuse the config redactor so the in-memory metadata scan matches the
         # user's custom secret patterns exactly as the on-disk file scan does.
         for pf in check_public_export_payload(metadata, include_prompts=False, redactor=redactor):
-            findings.append(
-                ValidationFinding("privacy", pf.code, f"Privacy violation at {pf.path}", pf.path)
-            )
+            findings.append(_finding(pf.code, f"Privacy violation at {pf.path}", pf.path))
     return findings
 
 

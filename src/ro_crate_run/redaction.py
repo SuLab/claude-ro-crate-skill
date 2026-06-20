@@ -5,26 +5,59 @@ environment variables before any data is persisted to the event journal or a
 crate. A `Redactor` carries a table of compiled credential patterns (built-in
 plus optional user-supplied ones) and an environment-variable allowlist.
 
-This module is also the single home for the on-disk secret-scan helpers
-(`scan_file_for_secrets`, `scan_tree`): they read each file losslessly as
-latin-1 so an ASCII secret embedded in an otherwise-binary blob is still
-caught, and skip a file only when it cannot be read at all (OSError).
+This module is also the home for the on-disk secret-scan helpers
+(`iter_regular_files`, `scan_file_for_secrets`, `scan_tree`): they read each
+file losslessly as latin-1 so an ASCII secret embedded in an otherwise-binary
+blob is still caught, and skip a file only when it cannot be read at all
+(OSError). `iter_regular_files` is the one canonical tree walk callers route
+through.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from .constants import DEFAULT_ENV_ALLOWLIST
 from .models import RcrConfig, RedactionResult
 
 REDACTION_TOKEN = "[REDACTED:secret]"
 
+# Single source of truth for secret-bearing key/identifier names. Both the
+# lowercase gate (`key_pattern`) and the uppercase KEY=VALUE assignment regex in
+# `redact_text` are built from this tuple so the two can never drift apart — a
+# divergence would let the gate scan-positive while the substitution misses (or
+# vice versa), a real leak risk in a security-critical redactor.
+_SECRET_KEYWORDS: tuple[str, ...] = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "cookie",
+    "credential",
+    "private_key",
+    "api_key",
+    "access_key",
+    "refresh_token",
+)
+_KEYWORD_ALTERNATION = "|".join(_SECRET_KEYWORDS)
+
 
 class Redactor:
-    def __init__(self, environment_allowlist: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        environment_allowlist: list[str] | None = None,
+        *,
+        enabled: bool = True,
+    ) -> None:
+        # When False the redactor is a no-op: redact_text/capture_environment/
+        # redact_value short-circuit. This makes the "disabled means no
+        # redaction" contract explicit instead of encoding it as a never-match
+        # sentinel regex.
+        self.enabled = enabled
         self.environment_allowlist = set(environment_allowlist or [])
         # Built-in credential patterns, each tagged with a category name so a
         # RedactionResult can report which kind(s) of secret were masked.
@@ -49,8 +82,12 @@ class Redactor:
                 ),
             ),
         ]
-        self.key_pattern = re.compile(
-            r"(?i)(token|secret|password|passwd|cookie|credential|private_key|api_key|access_key|refresh_token)"
+        # Gate pattern (any sensitive keyword anywhere in a key/text) and the
+        # KEY=VALUE assignment-redaction pattern are both derived from
+        # `_SECRET_KEYWORDS` so they share one vocabulary.
+        self.key_pattern = re.compile(rf"(?i)({_KEYWORD_ALTERNATION})")
+        self._assignment_pattern = re.compile(
+            rf"(?i)([A-Z0-9_]*(?:{_KEYWORD_ALTERNATION})[A-Z0-9_]*\s*=\s*)\S+"
         )
 
     @classmethod
@@ -86,8 +123,7 @@ class Redactor:
     def from_config(cls, cfg: RcrConfig, state_dir: Path | None = None) -> Redactor:
         redactor = cls.default(cfg.redaction.environment_allowlist)
         if not cfg.redaction.enabled:
-            redactor.patterns = []
-            redactor.key_pattern = re.compile(r"(?!x)x")  # matches nothing
+            redactor.enabled = False
             return redactor
         patterns_file = cfg.redaction.patterns_file
         if patterns_file:
@@ -112,20 +148,17 @@ class Redactor:
     @classmethod
     def default(cls, environment_allowlist: list[str] | None = None) -> Redactor:
         return cls(
-            environment_allowlist=environment_allowlist
-            or ["PATH", "LANG", "LC_ALL", "SHELL", "PYTHONPATH", "CONDA_DEFAULT_ENV", "VIRTUAL_ENV"]
+            environment_allowlist=environment_allowlist or list(DEFAULT_ENV_ALLOWLIST)
         )
 
     def redact_text(self, text: str) -> RedactionResult:
         applied = 0
         categories: list[str] = []
         redacted = text
+        if not self.enabled:
+            return RedactionResult(redacted, applied, ())
         if self.key_pattern.search(redacted):
-            redacted = re.sub(
-                r"(?i)([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|CREDENTIAL|PRIVATE_KEY|API_KEY|ACCESS_KEY|REFRESH_TOKEN)[A-Z0-9_]*\s*=\s*)\S+",
-                r"\1" + REDACTION_TOKEN,
-                redacted,
-            )
+            redacted = self._assignment_pattern.sub(r"\1" + REDACTION_TOKEN, redacted)
             if redacted != text:
                 applied += 1
                 categories.append("secret-assignment")
@@ -139,12 +172,19 @@ class Redactor:
     def capture_environment(self, env: dict[str, str]) -> dict[str, str]:
         captured: dict[str, str] = {}
         for key, value in env.items():
-            if key not in self.environment_allowlist or self.key_pattern.search(key):
+            if key not in self.environment_allowlist:
+                continue
+            # A disabled redactor keeps the historical no-op behavior: it neither
+            # drops sensitive-named keys nor masks values (matching the former
+            # never-match-key_pattern path).
+            if self.enabled and self.key_pattern.search(key):
                 continue
             captured[key] = self.redact_text(value).text
         return captured
 
     def redact_value(self, value: Any) -> tuple[Any, int]:
+        if not self.enabled:
+            return value, 0
         if isinstance(value, str):
             result = self.redact_text(value)
             return result.text, result.applied
@@ -160,11 +200,29 @@ class Redactor:
             redacted_dict: dict[str, Any] = {}
             applied = 0
             for key, item in value.items():
+                # Key-name redaction (mirrors capture_environment): when a key
+                # names a credential, mask its scalar leaf value even if the
+                # value itself matches no value pattern. Without this a payload
+                # like {"password": "hunter2"} would be journaled in cleartext.
+                if self.key_pattern.search(key) and self._is_scalar_leaf(item):
+                    redacted_dict[key] = REDACTION_TOKEN
+                    applied += 1
+                    continue
                 redacted, count = self.redact_value(item)
                 redacted_dict[key] = redacted
                 applied += count
             return redacted_dict, applied
         return value, 0
+
+    @staticmethod
+    def _is_scalar_leaf(value: Any) -> bool:
+        """Whether a value is a non-container leaf eligible for key-name masking.
+
+        Scoping key-name redaction to scalar leaves keeps `redaction.applied`
+        counts meaningful and avoids clobbering nested structures whole — those
+        recurse so their own scalars are still value- and key-name-redacted.
+        """
+        return value is not None and not isinstance(value, (dict, list))
 
 
 def scan_file_for_secrets(path: Path, redactor: Redactor) -> list[str]:
@@ -183,6 +241,17 @@ def scan_file_for_secrets(path: Path, redactor: Redactor) -> list[str]:
     return list(redactor.redact_text(text).categories)
 
 
+def iter_regular_files(root: Path) -> Iterator[Path]:
+    """Yield every regular file under ``root`` in sorted path order.
+
+    The single canonical tree walk for the on-disk secret scanners so the
+    "sorted, regular files only" traversal policy lives in exactly one place.
+    """
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            yield path
+
+
 def scan_tree(root: Path, redactor: Redactor) -> list[tuple[Path, list[str]]]:
     """Scan every regular file under ``root`` for secrets.
 
@@ -191,9 +260,7 @@ def scan_tree(root: Path, redactor: Redactor) -> list[tuple[Path, list[str]]]:
     latin-1 / OSError-only policy as `scan_file_for_secrets`.
     """
     hits: list[tuple[Path, list[str]]] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in iter_regular_files(root):
         categories = scan_file_for_secrets(path, redactor)
         if categories:
             hits.append((path, categories))

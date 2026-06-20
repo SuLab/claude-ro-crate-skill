@@ -15,7 +15,8 @@ from typing import Any
 
 from filelock import FileLock
 
-from .events import compute_event_hash, dump_event_line, event_from_dict
+from .constants import COMMAND_TERMINAL_EVENTS, RUN_TERMINAL_EVENTS
+from .events import dump_event_line, event_from_dict, verify_hash_chain
 from .journal import EventWriter
 from .models import RcrEvent
 from .state import load_state, write_state
@@ -31,8 +32,7 @@ class RecoveryResult:
 
 def is_active_run(events: list[Any]) -> bool:
     """Return True if no terminal event (run.finalized or run.aborted) exists."""
-    terminal = {"run.finalized", "run.aborted"}
-    return not any(e.get("event_type") in terminal for e in events)
+    return not any(e.get("event_type") in RUN_TERMINAL_EVENTS for e in events)
 
 
 def recover_state(state_dir: Path, active_run: bool = False) -> RecoveryResult:
@@ -54,20 +54,12 @@ def _recover_state_locked(state_dir: Path, active_run: bool = False) -> Recovery
         return result
     parsed = [event_from_dict(item) for item in raw_events]
     result.events = list(parsed)
-    previous = None
-    for item in raw_events:
-        if item.get("previous_event_hash") != previous:
-            result.fatal = True
-            result.errors.append("hash chain previous hash mismatch")
-            _emit_repair_failed(state_dir, "hash chain previous hash mismatch")
-            return result
-        expected = compute_event_hash(item)
-        if item.get("event_hash") != expected:
-            result.fatal = True
-            result.errors.append("hash chain event hash mismatch")
-            _emit_repair_failed(state_dir, "hash chain event hash mismatch")
-            return result
-        previous = item.get("event_hash")
+    chain_error = verify_hash_chain(raw_events)
+    if chain_error is not None:
+        result.fatal = True
+        result.errors.append(chain_error)
+        _emit_repair_failed(state_dir, chain_error)
+        return result
 
     state = load_state(state_dir)
     if parsed and (
@@ -98,15 +90,10 @@ def _recover_state_locked(state_dir: Path, active_run: bool = False) -> Recovery
         result.repaired = True
         result.events.append(completed)
 
-    terminals = {
-        "execution.command.completed",
-        "execution.command.failed",
-        "execution.command.blocked",
-    }
     terminal_ids = {
         event.payload.get("command_id")
         for event in result.events
-        if event.event_type in terminals and event.payload.get("command_id")
+        if event.event_type in COMMAND_TERMINAL_EVENTS and event.payload.get("command_id")
     }
     if not active_run:
         writer = EventWriter(state_dir)
@@ -179,10 +166,15 @@ def _read_events_repairing_partial_line(
             parsed.append(json.loads(line))
         except json.JSONDecodeError as exc:
             if idx == len(lines) - 1:
-                path.write_text(
+                # Atomic rewrite (tmp + replace, matching state.write_state) so a crash
+                # mid-write can never truncate the authoritative append-only journal; the
+                # enclosing append FileLock keeps it exclusive with concurrent appends.
+                tmp = path.with_name("events.ndjson.tmp")
+                tmp.write_text(
                     "".join(dump_event_line(event) for event in parsed),
                     encoding="utf-8",
                 )
+                tmp.replace(path)
                 repaired = True
                 break
             return parsed, False, [f"invalid journal JSON at line {idx + 1}: {exc}"]

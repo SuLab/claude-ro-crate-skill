@@ -15,7 +15,7 @@ from ro_crate_run.events import ACTOR_NAMES, ACTOR_TYPES, crate_actor_id, engine
 from ro_crate_run.ids import software_entity_id
 from ro_crate_run.models import RunModel
 
-from ._helpers import _strip_none
+from ._helpers import strip_none
 
 
 def build_actors(model: RunModel) -> list[dict[str, Any]]:
@@ -41,13 +41,13 @@ def build_actors(model: RunModel) -> list[dict[str, Any]]:
             "name": ACTOR_NAMES["claude-code"],
         },
         {
-            "@id": "#actor/ro-crate-py",
+            "@id": crate_actor_id("ro-crate-py"),
             "@type": "SoftwareApplication",
             "name": "ro-crate-py",
             "softwareVersion": env.get("rocrate_package_version"),
         },
         {
-            "@id": "#actor/python",
+            "@id": crate_actor_id("python"),
             "@type": "SoftwareApplication",
             "name": "Python",
             "softwareVersion": env.get("python"),
@@ -56,7 +56,7 @@ def build_actors(model: RunModel) -> list[dict[str, Any]]:
     if env.get("claude_model"):
         actors.append(
             {
-                "@id": "#actor/claude-model",
+                "@id": crate_actor_id("claude-model"),
                 # A model maps to SoftwareApplication (AIModel is not a context term).
                 "@type": "SoftwareApplication",
                 "name": str(env["claude_model"]),
@@ -64,7 +64,11 @@ def build_actors(model: RunModel) -> list[dict[str, Any]]:
         )
     if env.get("shell"):
         actors.append(
-            {"@id": "#actor/shell", "@type": "SoftwareApplication", "name": str(env["shell"])}
+            {
+                "@id": crate_actor_id("shell"),
+                "@type": "SoftwareApplication",
+                "name": str(env["shell"]),
+            }
         )
     if model.workflow and model.workflow.get("engine") and model.workflow["engine"] != "unknown":
         engine = str(model.workflow["engine"])
@@ -83,7 +87,7 @@ def build_actors(model: RunModel) -> list[dict[str, Any]]:
             }
         )
     # Strip None-valued fields before returning.
-    return [_strip_none(actor) for actor in actors]
+    return [strip_none(actor) for actor in actors]
 
 
 def build_software(model: RunModel) -> list[dict[str, Any]]:

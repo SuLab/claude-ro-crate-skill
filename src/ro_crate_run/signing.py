@@ -37,10 +37,20 @@ def signing_available() -> bool:
     return _CRYPTO_AVAILABLE
 
 
-def generate_keypair() -> tuple[str, str]:
-    """Generate a new Ed25519 keypair. Returns (private_pem, public_pem)."""
+def _require_crypto() -> None:
+    """Assert the cryptography extra is installed; raise before any crypto symbol is touched.
+
+    Every public signing helper calls this first. The eager raise (before any
+    ``ed25519``/``serialization`` reference) keeps graceful degradation when the
+    extra is absent and avoids an unused ``# type: ignore`` when it IS installed.
+    """
     if not _CRYPTO_AVAILABLE:
         raise SigningUnavailable(_UNAVAILABLE_MESSAGE)
+
+
+def generate_keypair() -> tuple[str, str]:
+    """Generate a new Ed25519 keypair. Returns (private_pem, public_pem)."""
+    _require_crypto()
     private = ed25519.Ed25519PrivateKey.generate()
     private_pem = private.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -56,8 +66,7 @@ def generate_keypair() -> tuple[str, str]:
 
 def public_key_from_private(private_pem: str) -> str:
     """Derive the Ed25519 public-key PEM from a private-key PEM."""
-    if not _CRYPTO_AVAILABLE:
-        raise SigningUnavailable(_UNAVAILABLE_MESSAGE)
+    _require_crypto()
     private = serialization.load_pem_private_key(private_pem.encode(), password=None)
     pem = private.public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
@@ -68,8 +77,7 @@ def public_key_from_private(private_pem: str) -> str:
 
 def sign_manifest(path: Path, private_pem: str) -> str:
     """Sign the contents of a file with an Ed25519 private key. Returns base64 signature."""
-    if not _CRYPTO_AVAILABLE:
-        raise SigningUnavailable(_UNAVAILABLE_MESSAGE)
+    _require_crypto()
     private = cast(
         "ed25519.Ed25519PrivateKey",
         serialization.load_pem_private_key(private_pem.encode(), password=None),
@@ -80,8 +88,7 @@ def sign_manifest(path: Path, private_pem: str) -> str:
 
 def verify_manifest_signature(path: Path, signature: str, public_pem: str) -> bool:
     """Verify an Ed25519 signature against a file's contents. Returns True if valid."""
-    if not _CRYPTO_AVAILABLE:
-        raise SigningUnavailable(_UNAVAILABLE_MESSAGE)
+    _require_crypto()
     from cryptography.exceptions import InvalidSignature
 
     public = cast(

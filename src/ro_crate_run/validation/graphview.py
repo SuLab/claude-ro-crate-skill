@@ -1,7 +1,13 @@
-"""Shared helpers for reading an RO-Crate ``@graph``: coercing scalar-or-list
-JSON-LD values to lists, reading an entity's ``@type``, and detecting Action
-entities. These views are consumed by every level-2/3/4 checker so the
-normalization rules live in one place."""
+"""Shared, dependency-free helpers for reading an RO-Crate ``@graph``: coercing
+scalar-or-list JSON-LD values to lists, reading an entity's ``@type``, and
+detecting Action entities. These views are consumed by every level-2/3/4 checker
+so the normalization rules live in one place.
+
+This module imports nothing from the rest of the validation package (or the
+project), so it is a neutral utility any layer can import — the materializer,
+the adapters, and ``inspect`` route their ``@type``/Action coercion through it
+rather than re-implementing the same rules.
+"""
 
 from __future__ import annotations
 

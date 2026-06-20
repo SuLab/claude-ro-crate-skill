@@ -6,16 +6,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from ro_crate_run.constants import PROFILE_URIS, RO_CRATE_SPEC_URI, is_web_id
-from ro_crate_run.fs import sha256_file
+from ro_crate_run.constants import RO_CRATE_SPEC_URI, ROOT_DATASET_ID, is_web_id
+from ro_crate_run.fs import bare_sha256, sha256_file
 from ro_crate_run.models import ValidationFinding
 
 from .context import ValidationContext
-from .graphview import types_of
+from .graphview import as_list, types_of
 from .jsonld import expand_metadata
 
 _ROOT_REQUIRED_ALWAYS = ("name", "description", "license")
 _ROOT_REQUIRED_CONDITIONAL = ("datePublished",)
+
+
+def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
+    """Construct an L2 (``ro_crate``) finding; the level is bound here so it is
+    not repeated on every emission in this checker."""
+    return ValidationFinding("ro_crate", code, message, path)
 
 
 def _deref(candidate: Any, entities: dict[Any, dict[str, Any]]) -> Any:
@@ -23,7 +29,8 @@ def _deref(candidate: Any, entities: dict[Any, dict[str, Any]]) -> Any:
     top-level node. The materializer node-ifies nested typed dicts (RO-Crate 1.2 MUST:
     no anonymous inlining), so an ``identifier``/``additionalProperty`` value is a bare
     reference rather than an inline dict; resolve it before reading propertyID/value.
-    Inline dicts (legacy) pass through unchanged."""
+    A value that is already an inline dict (e.g. from an externally-authored / imported
+    crate, not produced by this materializer) passes through unchanged."""
     if isinstance(candidate, dict) and set(candidate.keys()) == {"@id"}:
         return entities.get(candidate["@id"], candidate)
     return candidate
@@ -35,14 +42,12 @@ def _recorded_sha256(entity: dict[str, Any], entities: dict[Any, dict[str, Any]]
     The hash is carried as an ``identifier`` PropertyValue (propertyID ``sha256``);
     files skipped for hashing (e.g. over the size limit) carry no such value.
     """
-    identifier = entity.get("identifier")
-    candidates = identifier if isinstance(identifier, list) else [identifier]
-    for candidate in candidates:
+    for candidate in as_list(entity.get("identifier")):
         candidate = _deref(candidate, entities)
         if isinstance(candidate, dict) and candidate.get("propertyID") == "sha256":
             value = candidate.get("value")
             if isinstance(value, str) and value:
-                return value.replace("sha256:", "")
+                return bare_sha256(value)
     return None
 
 
@@ -63,8 +68,7 @@ def _deleted_file_ids(graph: list[dict[str, Any]]) -> set[str]:
         if "DeleteAction" not in types_of(entity):
             continue
         for key in ("object", "result"):
-            refs = entity.get(key, [])
-            refs = refs if isinstance(refs, list) else [refs]
+            refs = as_list(entity.get(key, []))
             ids.update(str(r["@id"]) for r in refs if isinstance(r, dict) and r.get("@id"))
     return ids
 
@@ -72,8 +76,7 @@ def _deleted_file_ids(graph: list[dict[str, Any]]) -> set[str]:
 def _entity_existence(entity: dict[str, Any], entities: dict[Any, dict[str, Any]]) -> str | None:
     """The existence class materialized on a File/Dataset entity (its `existence`
     additionalProperty PropertyValue), or None."""
-    ap = entity.get("additionalProperty")
-    for prop in (ap if isinstance(ap, list) else [ap]):
+    for prop in as_list(entity.get("additionalProperty")):
         prop = _deref(prop, entities)
         if isinstance(prop, dict) and prop.get("propertyID") == "existence":
             return str(prop.get("value"))
@@ -115,7 +118,7 @@ def _haspart_reachable(graph: list[dict[str, Any]]) -> set[str]:
     """
     by_id = {str(e.get("@id")): e for e in graph if isinstance(e, dict) and e.get("@id")}
     reachable: set[str] = set()
-    frontier = ["./"]
+    frontier = [ROOT_DATASET_ID]
     while frontier:
         current = frontier.pop()
         entity = by_id.get(current)
@@ -147,7 +150,7 @@ def _is_local_data_entity(entity: dict[str, Any]) -> bool:
     if "File" not in types and "Dataset" not in types:
         return False
     eid = str(entity.get("@id", ""))
-    if eid in ("", "./", "ro-crate-metadata.json"):
+    if eid in ("", ROOT_DATASET_ID, "ro-crate-metadata.json"):
         return False
     if is_web_id(eid) or eid.startswith("#"):
         return False
@@ -159,47 +162,40 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
     metadata = ctx.metadata
     if metadata is None:
         if not (ctx.state_dir / "ro-crate" / "ro-crate-metadata.json").exists():
-            findings.append(ValidationFinding("ro_crate", "metadata_missing", "ro-crate-metadata.json is missing"))
+            findings.append(_finding("metadata_missing", "ro-crate-metadata.json is missing"))
         else:
-            findings.append(ValidationFinding("ro_crate", "metadata_invalid_json", "ro-crate-metadata.json is not valid JSON"))
+            findings.append(_finding("metadata_invalid_json", "ro-crate-metadata.json is not valid JSON"))
         return findings
 
     triples, expand_error = expand_metadata(metadata)
     if expand_error is not None:
-        findings.append(ValidationFinding("ro_crate", "jsonld_expansion_failed", f"JSON-LD did not expand: {expand_error}"))
+        findings.append(_finding("jsonld_expansion_failed", f"JSON-LD did not expand: {expand_error}"))
     elif triples == 0:
-        findings.append(ValidationFinding("ro_crate", "jsonld_empty", "JSON-LD expanded to zero triples"))
+        findings.append(_finding("jsonld_empty", "JSON-LD expanded to zero triples"))
 
     entities = ctx.entities
     descriptor = entities.get("ro-crate-metadata.json")
-    root = entities.get("./")
+    root = entities.get(ROOT_DATASET_ID)
 
     if not descriptor or descriptor.get("conformsTo", {}).get("@id") != RO_CRATE_SPEC_URI:
-        findings.append(ValidationFinding("ro_crate", "descriptor_invalid_conforms_to", "Descriptor must conform to RO-Crate 1.2"))
-    if not descriptor or descriptor.get("about", {}).get("@id") != "./":
-        findings.append(ValidationFinding("ro_crate", "descriptor_about_invalid", "Descriptor must point to root"))
+        findings.append(_finding("descriptor_invalid_conforms_to", "Descriptor must conform to RO-Crate 1.2"))
+    if not descriptor or descriptor.get("about", {}).get("@id") != ROOT_DATASET_ID:
+        findings.append(_finding("descriptor_about_invalid", "Descriptor must point to root"))
 
     if not root:
-        findings.append(ValidationFinding("ro_crate", "root_missing", "Root Data Entity is missing"))
+        findings.append(_finding("root_missing", "Root Data Entity is missing"))
         return findings
 
     if root.get("@type") != "Dataset" and "Dataset" not in root.get("@type", []):
-        findings.append(ValidationFinding("ro_crate", "root_not_dataset", "Root must be Dataset"))
+        findings.append(_finding("root_not_dataset", "Root must be Dataset"))
     for key in _ROOT_REQUIRED_ALWAYS:
         if key not in root:
-            findings.append(ValidationFinding("ro_crate", f"root_missing_{key}", f"Root missing {key}"))
+            findings.append(_finding(f"root_missing_{key}", f"Root missing {key}"))
     if ctx.cfg.validation.require_date_published and "datePublished" not in root:
-        findings.append(ValidationFinding("ro_crate", "root_missing_datePublished", "Root missing datePublished"))
-
-    conforms = root.get("conformsTo", [])
-    if isinstance(conforms, dict):
-        conforms = [conforms]
-    selected_uri = PROFILE_URIS.get(ctx.state.selected_profile, "")
-    if {"@id": ctx.state.profile_uri} not in conforms and {"@id": selected_uri} not in conforms:
-        findings.append(ValidationFinding("profile", "root_missing_profile", "Root missing selected profile conformance"))
+        findings.append(_finding("root_missing_datePublished", "Root missing datePublished"))
 
     if _contains_null(metadata):
-        findings.append(ValidationFinding("ro_crate", "json_null_present", "Metadata contains JSON null"))
+        findings.append(_finding("json_null_present", "Metadata contains JSON null"))
 
     crate_dir = ctx.state_dir / "ro-crate"
     project_root = ctx.state_dir.parent
@@ -229,7 +225,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
             # Also trust the existence materialized on the entity itself (e.g. imported files
             # carry a declared-only existence but are not in state.declared_*), not only state.
             if eid not in exempt_ids and _entity_existence(entity, entities) not in _ABSENT_EXISTENCE:
-                findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
+                findings.append(_finding("referenced_file_missing", f"Referenced file not present: {eid}", eid))
             continue
         # Content integrity: a crate's recorded sha256 must match the bytes on disk.
         # Re-hashing catches post-checkpoint drift of declared inputs/outputs and corruption
@@ -243,13 +239,12 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
             if recorded is not None:
                 disk_paths = [crate_path, project_path] if crate_path != project_path else [crate_path]
                 for disk_path in disk_paths:
-                    if disk_path.is_file() and sha256_file(disk_path).replace("sha256:", "") != recorded:
+                    if disk_path.is_file() and bare_sha256(sha256_file(disk_path)) != recorded:
                         findings.append(
-                            ValidationFinding(
-                                "ro_crate",
+                            _finding(
                                 "file_content_mismatch",
                                 f"Recorded sha256 does not match file content: {eid}",
-                                path=eid,
+                                eid,
                             )
                         )
                         break
@@ -267,8 +262,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         for node in _find_anonymous_nodes(entity):
             type_hint = node.get("@type")
             findings.append(
-                ValidationFinding(
-                    "ro_crate",
+                _finding(
                     "anonymous_entity",
                     f"Anonymous node with @type={type_hint!r} has no @id (must be a flat, identified entity)",
                 )
@@ -284,11 +278,10 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         eid = str(entity.get("@id"))
         if eid not in reachable:
             findings.append(
-                ValidationFinding(
-                    "ro_crate",
+                _finding(
                     "data_entity_unreachable",
                     f"Data entity not reachable from root via hasPart: {eid}",
-                    path=eid,
+                    eid,
                 )
             )
     return findings

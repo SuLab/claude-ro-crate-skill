@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ._helpers import _strip_none
+from ._helpers import sha256_identifier, strip_none
 
 
 def build_file_entity(
@@ -50,11 +50,7 @@ def build_file_entity(
     }
     add_props: list[dict[str, Any]] = []
     if rec.get("sha256"):
-        entity["identifier"] = {
-            "@type": "PropertyValue",
-            "propertyID": "sha256",
-            "value": str(rec["sha256"]).replace("sha256:", ""),
-        }
+        entity["identifier"] = sha256_identifier(str(rec["sha256"]))
     elif rec.get("hash_status") == "skipped":
         add_props.append({
             "@type": "PropertyValue",
@@ -77,4 +73,5 @@ def build_file_entity(
         entity["additionalProperty"] = add_props[0] if len(add_props) == 1 else add_props
     if formal_parameter_id:
         entity["exampleOfWork"] = {"@id": formal_parameter_id}
-    return _strip_none(entity)
+    stripped: dict[str, Any] = strip_none(entity)
+    return stripped

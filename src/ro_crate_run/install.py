@@ -11,9 +11,22 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
 from typing import Any, cast
+
+# Permission bits OR-ed into copied executable assets (owner/group/other rwx, x).
+_EXEC_MODE_BITS = 0o755
+
+
+def _is_executable_asset(name: str) -> bool:
+    """Whether a copied shipped asset must be made executable.
+
+    Single source of truth so install_project and the tree walker agree on which
+    assets get ``+x``: the ``rcr`` launcher and any ``*.py`` wrapper/hook script.
+    """
+    return name.endswith(".py") or name == "rcr"
 
 
 def install_project(target: str, force: bool = False) -> int:
@@ -29,7 +42,7 @@ def install_project(target: str, force: bool = False) -> int:
         if not dest_skill.exists():
             _copy_resource_tree(_asset_root() / "skills" / skill_name, dest_skill)
     for hook in (_asset_root() / "hooks").iterdir():
-        if hook.name.startswith("rocrate_") and hook.name.endswith(".py"):
+        if hook.name.startswith("rocrate_") and _is_executable_asset(hook.name):
             _copy_resource_file(hook, claude / "hooks" / hook.name, executable=True)
     # Vendor the importable package so wrappers/hooks work without a pip install.
     lib_dir = claude / "lib" / "ro_crate_run"
@@ -64,22 +77,41 @@ def _read_json_resource(path: Any) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
-def _copy_resource_tree(source: Any, destination: Path) -> None:
+def _mirror_tree(
+    source: Any,
+    destination: Path,
+    *,
+    exclude: Callable[[Any], bool] | None = None,
+    executable: Callable[[str], bool] | None = None,
+) -> None:
+    """Recursively copy ``source`` into ``destination`` via ``write_bytes`` per file.
+
+    The single tree-walker shared by every install copy path: skips entries for
+    which ``exclude`` returns True, and marks a copied file executable when
+    ``executable(name)`` returns True. Recurses into subdirectories so traversal
+    is depth-agnostic (a future contexts/ subdir is carried automatically).
+    """
     destination.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
+        if exclude is not None and exclude(item):
+            continue
         target = destination / item.name
         if item.is_dir():
-            _copy_resource_tree(item, target)
+            _mirror_tree(item, target, exclude=exclude, executable=executable)
         else:
-            executable = item.name.endswith(".py") or item.name == "rcr"
-            _copy_resource_file(item, target, executable=executable)
+            is_exec = executable(item.name) if executable is not None else False
+            _copy_resource_file(item, target, executable=is_exec)
+
+
+def _copy_resource_tree(source: Any, destination: Path) -> None:
+    _mirror_tree(source, destination, executable=_is_executable_asset)
 
 
 def _copy_resource_file(source: Any, destination: Path, *, executable: bool = False) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(source.read_bytes())
     if executable:
-        destination.chmod(destination.stat().st_mode | 0o755)
+        destination.chmod(destination.stat().st_mode | _EXEC_MODE_BITS)
 
 
 def _vendor_package(package_root: Path, destination: Path) -> None:
@@ -93,20 +125,30 @@ def _vendor_package(package_root: Path, destination: Path) -> None:
         target = destination / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(item.read_bytes())
-    # The plugin-layout assets (hooks/skills/templates) are installed separately, but the
-    # vendored package itself MUST carry assets/contexts/ — validation's L2 JSON-LD
-    # expansion loads the vendored RO-Crate / workflow-run contexts via
+    # The plugin-layout assets (hooks/skills/templates) are installed separately into
+    # .claude/ and are deliberately NOT vendored here, but the package MUST carry the
+    # top-level assets/ files and assets/contexts/ — validation's L2 JSON-LD expansion
+    # loads the vendored RO-Crate / workflow-run contexts via
     # resources.files("ro_crate_run") / "assets" / "contexts". Without them a vendored
-    # (.claude/lib) deployment cannot expand JSON-LD and L2 validation breaks.
-    for rel_dir in (Path("assets"), Path("assets") / "contexts"):
-        src_dir = package_root / rel_dir
-        if not src_dir.is_dir():
-            continue
-        for item in src_dir.iterdir():
+    # (.claude/lib) deployment cannot expand JSON-LD and L2 validation breaks. The
+    # contexts/ subtree is mirrored recursively so a future nested dir is carried too.
+    assets_src = package_root / "assets"
+    if assets_src.is_dir():
+        for item in assets_src.iterdir():
             if item.is_file() and "__pycache__" not in item.parts:
-                target = destination / rel_dir / item.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(item.read_bytes())
+                _copy_resource_file(item, destination / "assets" / item.name)
+    contexts_src = assets_src / "contexts"
+    if contexts_src.is_dir():
+        _mirror_tree(
+            contexts_src,
+            destination / "assets" / "contexts",
+            exclude=_exclude_pycache,
+        )
+
+
+def _exclude_pycache(item: Any) -> bool:
+    """Exclude predicate for ``_mirror_tree``: skip ``__pycache__`` entries."""
+    return "__pycache__" in item.parts
 
 
 def _merge_settings(existing: dict[str, Any], fragment: dict[str, Any]) -> dict[str, Any]:

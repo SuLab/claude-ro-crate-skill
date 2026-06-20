@@ -46,6 +46,19 @@ def import_existing_ro_crate(crate: Path) -> list[dict[str, object]]:
         elif any(t.endswith("Action") for t in types) and eid != "./":
             status = entity.get("actionStatus", {})
             failed = isinstance(status, dict) and "Failed" in str(status.get("@id", ""))
+            # Emit a paired started BEFORE the terminal: the reducer only builds a
+            # CommandRecord on execution.command.started, so a terminal-only import
+            # would be dropped. The shared command_id also keeps recovery from
+            # flagging this synthesized started as abandoned (its terminal matches).
+            events.append({
+                "event_type": "execution.command.started",
+                "payload": {
+                    "command_id": eid,
+                    "action_id": eid,
+                    "display_command": entity.get("name", eid),
+                    "imported": True,
+                },
+            })
             events.append({
                 "event_type": "execution.command.failed" if failed else "execution.command.completed",
                 "payload": {

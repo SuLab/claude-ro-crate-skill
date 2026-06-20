@@ -12,7 +12,20 @@ from pathlib import Path
 
 from ro_crate_run.ids import IdMap, software_entity_id
 from ro_crate_run.materialize import mapping
-from ro_crate_run.models import CommandRecord, RunModel
+from ro_crate_run.models import AgentActivity, CommandRecord, RunModel
+
+# Agent-activity projection fields now live on RunModel.agent_activity; the helper below
+# accepts them as flat kwargs and routes them into the AgentActivity sub-model.
+_AGENT_ACTIVITY_FIELDS = {
+    "file_actions",
+    "raw_commands",
+    "subagents",
+    "blocked_actions",
+    "prompts",
+    "tool_uses",
+    "housekeeping",
+    "tool_decisions",
+}
 
 _FP_PROFILE = "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"
 _DOCKER = "https://w3id.org/ro/terms/workflow-run#DockerImage"
@@ -31,7 +44,10 @@ def _model(**kw: object) -> RunModel:
         profile_uri="https://w3id.org/ro/wfrun/provenance/0.5",
         mode="monitored",
     )
+    activity_kw = {k: kw.pop(k) for k in list(kw) if k in _AGENT_ACTIVITY_FIELDS}
     base.update(kw)
+    if activity_kw:
+        base["agent_activity"] = AgentActivity(**activity_kw)  # type: ignore[arg-type]
     return RunModel(**base)  # type: ignore[arg-type]
 
 

@@ -84,6 +84,39 @@ def test_recovery_repairs_partial_trailing_journal_line(tmp_path: Path) -> None:
     assert '"event_id": "partial"' not in (state_dir / "events.ndjson").read_text()
 
 
+def test_partial_line_repair_is_atomic_and_yields_valid_journal(tmp_path: Path) -> None:
+    # FIX A3: the partial-trailing-line repair must rewrite events.ndjson atomically
+    # (tmp + replace) and leave a fully-parseable journal whose hash chain still verifies.
+    state_dir = tmp_path / ".ro-crate-run"
+    make_run(state_dir)
+    writer = EventWriter(state_dir)
+    writer.append("human.note", payload={"text": "one"}, source_kind="human_cli")
+    writer.append("human.note", payload={"text": "two"}, source_kind="human_cli")
+    journal = state_dir / "events.ndjson"
+    good_lines = [ln for ln in journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    with journal.open("a", encoding="utf-8") as handle:
+        handle.write('{"event_id": "partial"')
+
+    result = recover_state(state_dir)
+
+    assert result.repaired is True
+    # No tmp file left behind — the rewrite atomically replaced the journal in place.
+    assert not (state_dir / "events.ndjson.tmp").exists()
+    rewritten = [ln for ln in journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    # The partial line is gone and every original good line survived intact.
+    assert '"event_id": "partial"' not in "\n".join(rewritten)
+    assert rewritten[: len(good_lines)] == good_lines
+    # Every line parses, so the rewrite produced a fully-valid NDJSON journal.
+    for line in rewritten:
+        json.loads(line)
+    # A fresh recovery finds nothing more to repair and no fatal hash-chain break,
+    # i.e. the atomically rewritten chain still verifies end to end.
+    rerun = recover_state(state_dir)
+    assert rerun.fatal is False
+    assert rerun.repaired is False
+    assert "journal.repair.failed" not in [e.event_type for e in rerun.events]
+
+
 def test_abandoned_command_marked_blocked(tmp_path: Path) -> None:
     state_dir = tmp_path / ".ro-crate-run"
     _bootstrap(state_dir)

@@ -7,6 +7,11 @@ import json
 from pathlib import Path
 
 from .state import read_events
+from .validation.graphview import as_list, is_action, types_of
+
+# Returned by inspect_crate when no crate has been materialized yet, so the CLI
+# prints a clear message instead of an uncaught FileNotFoundError reaching it.
+_NO_CRATE = {"error": "no crate; run rcr checkpoint"}
 
 
 def inspect_events(state_dir: Path) -> dict[str, object]:
@@ -20,15 +25,18 @@ def inspect_events(state_dir: Path) -> dict[str, object]:
 
 
 def inspect_crate(state_dir: Path) -> dict[str, object]:
-    metadata = json.loads((state_dir / "ro-crate" / "ro-crate-metadata.json").read_text())
+    metadata_path = state_dir / "ro-crate" / "ro-crate-metadata.json"
+    # Guard the missing manifest the same way mermaid_graph does: a run that has
+    # never checkpointed has no crate, so report cleanly rather than raising.
+    if not metadata_path.exists():
+        return dict(_NO_CRATE)
+    metadata = json.loads(metadata_path.read_text())
     root = next(entity for entity in metadata["@graph"] if entity["@id"] == "./")
-    actions = [entity for entity in metadata["@graph"] if "Action" in str(entity.get("@type"))]
-    files = [
-        entity
-        for entity in metadata["@graph"]
-        if entity.get("@type") == "File"
-        or (isinstance(entity.get("@type"), list) and "File" in entity["@type"])
-    ]
+    # Action/File membership routes through the shared @type-normalization helpers
+    # so this inspector and the validators agree on detection (e.g. scalar-or-list
+    # @type, *Action by suffix rather than a loose substring match).
+    actions = [entity for entity in metadata["@graph"] if is_action(entity)]
+    files = [entity for entity in metadata["@graph"] if "File" in types_of(entity)]
     return {
         "name": root["name"],
         "profile": root["conformsTo"],
@@ -56,11 +64,6 @@ def mermaid_graph(state_dir: Path) -> str:
             .replace(":", "_")
         )
 
-    def is_action(entity: dict[str, object]) -> bool:
-        types = entity.get("@type")
-        values = types if isinstance(types, list) else [types]
-        return any(str(value).endswith("Action") for value in values)
-
     for entity in graph:
         entity_id = str(entity.get("@id"))
         if is_action(entity):
@@ -77,11 +80,12 @@ def mermaid_graph(state_dir: Path) -> str:
 
 
 def _as_refs(value: object) -> list[str]:
+    """Extract ``@id`` strings from a scalar-or-list JSON-LD reference value,
+    coercing to a list via the shared graphview helper and dropping non-refs."""
     if value is None:
         return []
-    items = value if isinstance(value, list) else [value]
     refs: list[str] = []
-    for item in items:
+    for item in as_list(value):
         if isinstance(item, dict) and "@id" in item:
             refs.append(str(item["@id"]))
     return refs

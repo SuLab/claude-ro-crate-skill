@@ -220,14 +220,6 @@ Use this for a single repository:
         privacy-policy.md
       scripts/
         rcr
-        rocrate_start.py
-        rocrate_event.py
-        rocrate_run.py
-        rocrate_checkpoint.py
-        rocrate_validate.py
-        rocrate_finalize.py
-        rocrate_redact.py
-        rocrate_inspect.py
   hooks/
     rocrate_session_start.py
     rocrate_user_prompt.py
@@ -1002,7 +994,7 @@ The implementation MUST:
 ### 14.1 Materializer entry point
 
 ```text
-rocrate_checkpoint.py
+rcr checkpoint
 ```
 
 ### 14.2 Responsibilities
@@ -1654,7 +1646,7 @@ In enforced mode, Stop hook MUST block if:
 Recommended CI invocation:
 
 ```bash
-python3 .claude/skills/ro-crate-run/scripts/rocrate_validate.py --strict
+.claude/skills/ro-crate-run/scripts/rcr validate --strict
 ```
 
 CI SHOULD fail if:

@@ -7,11 +7,19 @@ from pathlib import Path
 engine_name = "cwl"
 homepage = "https://www.commonwl.org/"
 
+# Path patterns that name a CWL workflow definition (read by the registry seam).
+SUFFIXES: tuple[str, ...] = (".cwl",)
+FILENAMES: tuple[str, ...] = ()
+
 
 def identify(path: Path) -> dict[str, object] | None:
-    if path.suffix != ".cwl":
+    if path.suffix not in SUFFIXES:
         return None
-    text = path.read_text()
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        # Unreadable / non-UTF-8 file: skip rather than crash materialization.
+        return None
     steps: list[str] = []
     in_steps = False
     for line in text.splitlines():
@@ -24,4 +32,4 @@ def identify(path: Path) -> dict[str, object] | None:
             stripped = line.strip()
             if stripped.endswith(":") and not stripped.startswith("#"):
                 steps.append(stripped.rstrip(":"))
-    return {"engine": "cwl", "path": str(path), "steps": steps}
+    return {"engine": engine_name, "path": str(path), "steps": steps}

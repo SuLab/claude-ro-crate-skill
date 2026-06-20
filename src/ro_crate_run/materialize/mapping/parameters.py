@@ -13,7 +13,12 @@ from typing import Any
 from ro_crate_run import constants
 from ro_crate_run.models import RunModel
 
-from ._helpers import _FORMAL_PARAMETER_PROFILE, _formal_parameter_profile_entity
+from ._helpers import (
+    _FORMAL_PARAMETER_PROFILE,
+    _formal_parameter_profile_entity,
+    property_value,
+    ref,
+)
 
 
 def build_parameters(model: RunModel) -> list[dict[str, Any]]:
@@ -31,17 +36,14 @@ def build_parameters(model: RunModel) -> list[dict[str, Any]]:
                 "additionalType": parameter.get("type", "Text"),
                 "valueRequired": True,
                 # L2: WfRC 0.5 SHOULD — conformsTo the Bioschemas FormalParameter profile.
-                "conformsTo": {"@id": _FORMAL_PARAMETER_PROFILE},
+                "conformsTo": ref(_FORMAL_PARAMETER_PROFILE),
             }
         )
         entities.append(
             {
                 "@id": value_id,
-                "@type": "PropertyValue",
-                "name": name,
-                "propertyID": name,
-                "value": str(parameter.get("value", "")),
-                "exampleOfWork": {"@id": formal_id},
+                **property_value(name, str(parameter.get("value", "")), property_id=name),
+                "exampleOfWork": ref(formal_id),
             }
         )
     if model.parameters:
@@ -76,7 +78,7 @@ def workflow_formal_parameters(
                     "additionalType": "File",
                     "valueRequired": bool(item.get("required", False)),
                     # L2: WfRC 0.5 SHOULD — conformsTo the Bioschemas FormalParameter profile.
-                    "conformsTo": {"@id": _FORMAL_PARAMETER_PROFILE},
+                    "conformsTo": ref(_FORMAL_PARAMETER_PROFILE),
                 }
             )
     if params:
@@ -94,8 +96,8 @@ def build_parameter_connections(model: RunModel) -> list[dict[str, Any]]:
                 {
                     "@id": f"#connection/{idx}",
                     "@type": "ParameterConnection",
-                    "sourceParameter": {"@id": str(conn["source"])},
-                    "targetParameter": {"@id": str(conn["target"])},
+                    "sourceParameter": ref(str(conn["source"])),
+                    "targetParameter": ref(str(conn["target"])),
                 }
             )
     return entities

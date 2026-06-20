@@ -80,7 +80,7 @@ def validate_run(
         findings += check(ctx)
 
     errors = [f for f in findings if _is_error(f)]
-    warnings = [f for f in findings if f not in errors]
+    warnings = [f for f in findings if not _is_error(f)]
 
     levels: dict[str, str] = {name: "passed" for name in _LEVELS}
     for finding in warnings:
@@ -113,31 +113,16 @@ def validate_run(
     return report
 
 
-_PROFILE_WARNING_CODES = {
-    "open_phase",
-    "open_step",
-    # Workflow structural-quality findings: downgraded to warnings outside strict mode.
-    "workflow_no_action_uses_instrument",
-    "workflow_missing_formal_parameters",
-    "parameter_value_missing_exampleOfWork",
-    # A process crate with no recorded actions is a warning, not an error, in non-strict mode.
-    "no_actions",
-}
-
-
 def _is_error(finding: ValidationFinding) -> bool:
-    """Single authority for finding severity: True classifies the finding as an
-    error, False as a warning."""
-    # Privacy findings are always errors.
-    if finding.level == "privacy":
-        return True
-    # Reproducibility findings are warnings unless they carry the policy-required suffix.
-    if finding.level == "reproducibility":
-        return finding.code.endswith("_required")
-    # Named warning codes are never errors.
-    if finding.code in _PROFILE_WARNING_CODES:
-        return False
-    return True
+    """Classify a finding as an error (True) or warning (False).
+
+    Severity is structural: each checker states its intent at construction time
+    (``severity="warning"`` for the genuinely advisory findings — privacy is
+    always an error, reproducibility warns unless policy-required, the named
+    profile/state warning codes — and the default ``"error"`` otherwise), so this
+    is a trivial field read rather than a cross-module string-matching table.
+    """
+    return finding.severity == "error"
 
 
 def _report_dict(report: ValidationReport) -> dict[str, Any]:

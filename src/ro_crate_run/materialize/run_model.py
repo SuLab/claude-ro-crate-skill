@@ -3,12 +3,33 @@ RunModel. Crate-output changes belong here, never in stored state."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ro_crate_run import adapters
+from ro_crate_run.constants import COMMAND_TERMINAL_EVENTS, STEP_TERMINAL_EVENTS
 from ro_crate_run.events import event_from_dict
-from ro_crate_run.models import CommandRecord, RunModel
+from ro_crate_run.models import CommandRecord, RcrEvent, RunModel
 from ro_crate_run.state import load_state, read_events
+
+# A projector folds one event into the model. It mutates `model` in place and may
+# read/update the shared `commands_by_id` fold (the only cross-event state). Projectors
+# are dispatched in event-iteration order, so the started-before-terminal command fold
+# is preserved exactly as in the original sequential elif-ladder.
+Projector = Callable[["RunModel", "RcrEvent", "dict[str, CommandRecord]"], None]
+
+# Subagent/Task lifecycle events folded (one reduced record per task) into
+# agent_activity.subagents. Shared with profiles.py, which counts the raw lifecycle
+# events (not the collapsed records) so its structured-workflow heuristic is unchanged.
+SUBAGENT_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "agent.task.created",
+        "agent.task.completed",
+        "agent.subagent.started",
+        "agent.subagent.completed",
+    }
+)
 
 
 def build_run_model(state_dir: Path, through_sequence: int | None = None) -> RunModel:
@@ -34,264 +55,534 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
         events=events,
     )
     commands_by_id: dict[str, CommandRecord] = {}
+    # One sequential loop preserves event-iteration order; an unregistered event type is a
+    # no-op (housekeeping that the crate does not project).
     for event in events:
-        payload = event.payload
-        if event.event_type == "workflow.input.declared":
-            model.inputs.append(payload)
-            if (
-                payload.get("role") == "workflow-definition"
-                or str(payload.get("path", "")).endswith((".cwl", ".nf", ".wdl", ".ga"))
-                or Path(str(payload.get("path", ""))).name in {"Snakefile"}
-            ):
-                model.workflow = {
-                    "path": payload.get("path"),
-                    "name": Path(str(payload.get("path"))).name,
-                    "engine": _engine_for_path(str(payload.get("path"))),
-                }
-        elif event.event_type == "workflow.output.declared":
-            model.outputs.append(payload)
-        elif event.event_type == "workflow.parameter.declared":
-            model.parameters.append(payload)
-        elif event.event_type == "workflow.identified":
-            # An imported / engine-identified workflow definition (rcr import-ro-crate).
-            model.workflow = {
-                "path": payload.get("path") or payload.get("workflow_id"),
-                "name": payload.get("name")
-                or Path(str(payload.get("path", "workflow"))).name,
-                "engine": payload.get("engine", "imported-ro-crate"),
-            }
-        elif event.event_type == "file.observed":
-            # A file observed in an imported crate — materialize it as a referenced File
-            # (reachable from root via mentions) rather than silently dropping it.
-            model.inputs.append(
-                {
-                    "path": payload.get("path"),
-                    "role": payload.get("role", "imported"),
-                    "description": payload.get("name") or payload.get("path"),
-                    "existence": "declared-only",
-                }
-            )
-        elif event.event_type == "software.observed":
-            model.software.append(payload)
-        elif event.event_type == "human.note":
-            model.notes.append(payload | {"visibility": event.visibility})
-        elif event.event_type == "human.decision":
-            model.decisions.append(payload | {"visibility": event.visibility})
-        elif event.event_type == "workflow.phase.started":
-            model.phases[str(payload["name"])] = payload | {
-                "status": "started", "timestamp": event.timestamp,
-            }
-        elif event.event_type == "workflow.phase.completed":
-            entry = model.phases.setdefault(
-                str(payload["name"]), payload | {"timestamp": event.timestamp}
-            )
-            entry["status"] = "completed"
-            entry["end_timestamp"] = event.timestamp
-        elif event.event_type == "workflow.step.started":
-            step_id = str(payload["step_id"])
-            model.steps[step_id] = payload | {"status": "started"}
-        elif event.event_type in {
-            "workflow.step.completed",
-            "workflow.step.failed",
-            "workflow.step.skipped",
-        }:
-            step_id = str(payload["step_id"])
-            model.steps.setdefault(step_id, payload)["status"] = payload.get("status", "completed")
-        elif event.event_type == "execution.command.started":
-            record = CommandRecord(
-                command_id=str(payload["command_id"]),
-                event_id=event.event_id,
-                action_id=str(payload["action_id"]),
-                argv=list(payload.get("argv", [])),
-                display_command=str(payload.get("display_command", "")),
-                cwd=str(payload.get("cwd", "")),
-                started_at=event.timestamp,
-                step_id=event.step_id,
-                inputs=list(payload.get("inputs", [])),
-                outputs=list(payload.get("outputs", [])),
-                stdout_log=payload.get("stdout_log"),
-                stderr_log=payload.get("stderr_log"),
-                sidecar=payload.get("sidecar"),
-            )
-            commands_by_id[record.command_id] = record
-        elif event.event_type in {
-            "execution.command.completed",
-            "execution.command.failed",
-            "execution.command.blocked",
-        }:
-            completed_record = commands_by_id.get(str(payload["command_id"]))
-            if completed_record:
-                completed_record.ended_at = str(payload.get("ended_at", event.timestamp))
-                completed_record.exit_code = int(payload.get("exit_code", 0))
-                if event.event_type == "execution.command.completed":
-                    completed_record.terminal_status = "completed"
-                elif event.event_type == "execution.command.blocked":
-                    completed_record.terminal_status = "blocked"
-                else:
-                    completed_record.terminal_status = "failed"
-                completed_record.inputs = list(payload.get("inputs", completed_record.inputs))
-                completed_record.outputs = list(payload.get("outputs", completed_record.outputs))
-                completed_record.stdout_log = payload.get("stdout_log", completed_record.stdout_log)
-                completed_record.stderr_log = payload.get("stderr_log", completed_record.stderr_log)
-                completed_record.sidecar = payload.get("sidecar", completed_record.sidecar)
-        elif event.event_type == "environment.observed":
-            # Populate git state from the nested git dict if present.
-            git_data = payload.get("git")
-            if isinstance(git_data, dict) and git_data.get("available"):
-                model.git = dict(git_data)
-            # Populate environment summary fields.
-            env: dict[str, object] = {}
-            for key in ("python", "rocrate_package_version", "os", "shell", "claude_model"):
-                val = payload.get(key)
-                if val is not None:
-                    env[key] = val
-            # Capture allowlisted env vars when present.
-            env_vars = payload.get("env_vars")
-            if isinstance(env_vars, dict):
-                env["env_vars"] = dict(env_vars)
-            if env:
-                model.environment = env
-        elif event.event_type == "container.observed":
-            model.containers.append(
-                {
-                    "registry": payload.get("registry", ""),
-                    "image": payload.get("image", ""),
-                    "tag": payload.get("tag", ""),
-                    "digest": payload.get("digest", ""),
-                }
-            )
-        elif event.event_type == "dependency.lockfile.observed":
-            model.dependencies.append(
-                {
-                    "path": payload.get("path", ""),
-                    "kind": payload.get("kind", ""),
-                    "file_record": payload.get("file_record", ""),
-                }
-            )
-        elif event.event_type == "run.aborted":
-            model.aborted = True
-        elif event.event_type == "human.accepted_result":
-            model.results.append(payload | {"accepted": True, "timestamp": event.timestamp})
-        elif event.event_type == "human.rejected_result":
-            model.results.append(payload | {"accepted": False, "timestamp": event.timestamp})
-        elif event.event_type == "workflow.step.identified":
-            step_id = str(payload.get("step_id", payload.get("name", "")))
-            if step_id and step_id not in model.steps:
-                model.steps[step_id] = payload | {"status": "identified"}
-        elif event.event_type in {
-            "file.created", "file.modified", "file.changed", "file.deleted",
-        }:
-            # An agent file edit (Write/Edit/MultiEdit/NotebookEdit, or an external FileChanged).
-            # Skip edits to the internal provenance store — they are tooling, not the agent's
-            # work product, and must not become workflow steps.
-            _fa_path = str(payload.get("path", ""))
-            if "/.ro-crate-run/" in _fa_path or _fa_path.startswith(".ro-crate-run/"):
-                continue
-            model.file_actions.append({
-                "path": str(payload.get("path", "")),
-                "tool_name": str(payload.get("tool_name", "")),
-                "op": event.event_type.split(".", 1)[1],
-                "timestamp": event.timestamp,
-                "sequence": event.sequence,
-                "step_id": event.step_id,
-                "phase_id": event.phase_id,
-            })
-        elif event.event_type == "human.prompt":
-            model.prompts.append({
-                "prompt": str(payload.get("prompt", "")),
-                "prompt_hash": str(payload.get("prompt_hash", "")),
-                "timestamp": event.timestamp,
-                "sequence": event.sequence,
-            })
-        elif event.event_type == "tool.blocked":
-            model.blocked_actions.append({
-                "tool_name": str(payload.get("tool_name", "")),
-                "command": str(payload.get("command", "")),
-                "reason": str(payload.get("reason", "")),
-                "timestamp": event.timestamp,
-                "sequence": event.sequence,
-                "kind": "policy",
-            })
-        elif event.event_type == "permission.denied":
-            model.blocked_actions.append({
-                "tool_name": str(payload.get("tool_name", payload.get("tool", ""))),
-                "reason": str(payload.get("reason", payload.get("message", "permission denied"))),
-                "timestamp": event.timestamp,
-                "sequence": event.sequence,
-                "kind": "permission",
-            })
-        elif event.event_type == "tool.failed":
-            model.blocked_actions.append({
-                "tool_name": str(payload.get("tool_name", "")),
-                "reason": str(
-                    payload.get("error") or payload.get("message") or "tool use failed"
-                ),
-                "timestamp": event.timestamp,
-                "sequence": event.sequence,
-                "kind": "tool-failed",
-            })
-        elif event.event_type in {
-            "agent.task.created", "agent.task.completed",
-            "agent.subagent.started", "agent.subagent.completed",
-        }:
-            model.subagents.append({
-                "event": event.event_type,
-                "description": str(
-                    payload.get("description")
-                    or payload.get("prompt")
-                    or payload.get("subagent_type")
-                    or ""
-                ),
-                "subagent_type": str(payload.get("subagent_type", "")),
-                "task_id": str(
-                    payload.get("task_id") or payload.get("id") or payload.get("agentId") or ""
-                ),
-                "timestamp": event.timestamp,
-                "sequence": event.sequence,
-            })
-        elif event.event_type == "tool.completed":
-            tool_name = str(payload.get("tool_name", ""))
-            command = _bash_command(payload)
-            if tool_name in {"AskUserQuestion", "ExitPlanMode", "EnterPlanMode"}:
-                decision = _tool_decision(tool_name, payload, event.timestamp, event.sequence)
-                if decision is not None:
-                    model.tool_decisions.append(decision)
-            elif tool_name == "Bash" and command and not _is_rcr_invocation(command):
-                # Substantive raw shell NOT wrapped in rcr run (rcr-wrapped commands are
-                # already captured as execution.command.* -> CommandRecord; rcr/hook
-                # provenance tooling is excluded so it never pollutes the workflow).
-                model.raw_commands.append({
-                    "command": command,
-                    "timestamp": event.timestamp,
-                    "sequence": event.sequence,
-                    "step_id": event.step_id,
-                })
-            elif tool_name and tool_name != "Bash":
-                model.tool_uses.append({
-                    "tool_name": tool_name,
-                    "timestamp": event.timestamp,
-                    "sequence": event.sequence,
-                })
-        elif event.event_type in {
-            "environment.cwd.changed", "git.worktree.created", "git.worktree.removed",
-            "conversation.compaction.started", "conversation.compaction.completed",
-            "tool.batch.completed", "permission.requested",
-        }:
-            model.housekeeping.append({
-                "event": event.event_type,
-                "detail": str(
-                    payload.get("new_cwd") or payload.get("path") or payload.get("cwd") or ""
-                ),
-                "timestamp": event.timestamp,
-                "sequence": event.sequence,
-            })
+        projector = _PROJECTORS.get(event.event_type)
+        if projector is not None:
+            projector(model, event, commands_by_id)
     model.commands = list(commands_by_id.values())
+    # Collapse the raw per-event subagent/tool folds into reduced records BEFORE profile
+    # selection; profiles.py counts the raw lifecycle events (model.events), not the
+    # collapsed records, so its structured-workflow heuristic is unaffected.
+    _collapse_agent_activity(model)
     from .profiles import apply_selection, synthesize_workflow
     apply_selection(model, state.requested_profile)
     # The agent's actions are the workflow: when workflow/provenance is selected with no
     # external definition file, synthesize one so the crate conforms (SPEC §16).
     synthesize_workflow(model)
     return model
+
+
+# --- Workflow declarations -------------------------------------------------------------
+
+def _reduce_input_declared(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.inputs.append(payload)
+    path = str(payload.get("path", ""))
+    # Recognized workflow-definition shapes come from the adapter registry (the single
+    # source of truth for suffix->engine); a declared role overrides path detection.
+    if payload.get("role") == "workflow-definition" or adapters.is_workflow_definition(Path(path)):
+        model.workflow = {
+            "path": payload.get("path"),
+            "name": Path(str(payload.get("path"))).name,
+            "engine": adapters.engine_for_path(Path(path)) or "unknown",
+        }
+
+
+def _reduce_output_declared(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.outputs.append(event.payload)
+
+
+def _reduce_parameter_declared(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.parameters.append(event.payload)
+
+
+def _reduce_workflow_identified(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    # An imported / engine-identified workflow definition (rcr import-ro-crate).
+    payload = event.payload
+    model.workflow = {
+        "path": payload.get("path") or payload.get("workflow_id"),
+        "name": payload.get("name") or Path(str(payload.get("path", "workflow"))).name,
+        "engine": payload.get("engine", "imported-ro-crate"),
+    }
+
+
+def _reduce_file_observed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    # A file observed in an imported crate — materialize it as a referenced File
+    # (reachable from root via mentions) rather than silently dropping it.
+    payload = event.payload
+    model.inputs.append(
+        {
+            "path": payload.get("path"),
+            "role": payload.get("role", "imported"),
+            "description": payload.get("name") or payload.get("path"),
+            "existence": "declared-only",
+        }
+    )
+
+
+def _reduce_software_observed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.software.append(event.payload)
+
+
+# --- Human notes / decisions / results -------------------------------------------------
+
+def _reduce_human_note(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.notes.append(event.payload | {"visibility": event.visibility})
+
+
+def _reduce_human_decision(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.decisions.append(event.payload | {"visibility": event.visibility})
+
+
+def _reduce_accepted_result(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.results.append(event.payload | {"accepted": True, "timestamp": event.timestamp})
+
+
+def _reduce_rejected_result(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.results.append(event.payload | {"accepted": False, "timestamp": event.timestamp})
+
+
+# --- Phases / steps --------------------------------------------------------------------
+
+def _reduce_phase_started(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.phases[str(payload["name"])] = payload | {
+        "status": "started", "timestamp": event.timestamp,
+    }
+
+
+def _reduce_phase_completed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    entry = model.phases.setdefault(
+        str(payload["name"]), payload | {"timestamp": event.timestamp}
+    )
+    entry["status"] = "completed"
+    entry["end_timestamp"] = event.timestamp
+
+
+def _reduce_step_started(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    step_id = str(payload["step_id"])
+    model.steps[step_id] = payload | {"status": "started"}
+
+
+def _reduce_step_terminal(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    step_id = str(payload["step_id"])
+    model.steps.setdefault(step_id, payload)["status"] = payload.get("status", "completed")
+
+
+def _reduce_step_identified(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    step_id = str(payload.get("step_id", payload.get("name", "")))
+    if step_id and step_id not in model.steps:
+        model.steps[step_id] = payload | {"status": "identified"}
+
+
+# --- Command execution -----------------------------------------------------------------
+
+def _command_argv(payload: dict[str, Any]) -> list[str]:
+    """argv for a command record. Real `rcr run` payloads always carry argv; an imported
+    Action carries none, so fall back to the display command (then a generic token) — this
+    keeps the action's instrument basename resolvable to an emitted #software/* entity
+    rather than dangling on #software/unknown, while leaving real commands byte-identical."""
+    argv = list(payload.get("argv", []))
+    if argv:
+        return argv
+    return [str(payload.get("display_command", "")) or "imported-action"]
+
+
+def _reduce_command_started(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    record = CommandRecord(
+        command_id=str(payload["command_id"]),
+        event_id=event.event_id,
+        action_id=str(payload["action_id"]),
+        argv=_command_argv(payload),
+        display_command=str(payload.get("display_command", "")),
+        cwd=str(payload.get("cwd", "")),
+        started_at=event.timestamp,
+        step_id=event.step_id,
+        inputs=list(payload.get("inputs", [])),
+        outputs=list(payload.get("outputs", [])),
+        stdout_log=payload.get("stdout_log"),
+        stderr_log=payload.get("stderr_log"),
+        sidecar=payload.get("sidecar"),
+    )
+    commands_by_id[record.command_id] = record
+
+
+def _reduce_command_terminal(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    command_id = str(payload["command_id"])
+    # setdefault so a terminal-only command (imported Actions emit completed/failed; an
+    # importer that does not pair a started would otherwise be dropped) still materializes
+    # a CommandRecord. action_id falls back to command_id when no started seeded the record.
+    completed_record = commands_by_id.setdefault(
+        command_id,
+        CommandRecord(
+            command_id=command_id,
+            event_id=event.event_id,
+            action_id=str(payload.get("action_id", command_id)),
+            argv=_command_argv(payload),
+            display_command=str(payload.get("display_command", "")),
+            cwd="",
+            started_at=event.timestamp,
+            step_id=event.step_id,
+        ),
+    )
+    completed_record.ended_at = str(payload.get("ended_at", event.timestamp))
+    completed_record.exit_code = int(payload.get("exit_code", 0))
+    if event.event_type == "execution.command.completed":
+        completed_record.terminal_status = "completed"
+    elif event.event_type == "execution.command.blocked":
+        completed_record.terminal_status = "blocked"
+    else:
+        completed_record.terminal_status = "failed"
+    completed_record.inputs = list(payload.get("inputs", completed_record.inputs))
+    completed_record.outputs = list(payload.get("outputs", completed_record.outputs))
+    completed_record.stdout_log = payload.get("stdout_log", completed_record.stdout_log)
+    completed_record.stderr_log = payload.get("stderr_log", completed_record.stderr_log)
+    completed_record.sidecar = payload.get("sidecar", completed_record.sidecar)
+
+
+# --- Environment / containers / dependencies -------------------------------------------
+
+def _reduce_environment_observed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    # Populate git state from the nested git dict if present.
+    git_data = payload.get("git")
+    if isinstance(git_data, dict) and git_data.get("available"):
+        model.git = dict(git_data)
+    # Populate environment summary fields.
+    env: dict[str, object] = {}
+    for key in ("python", "rocrate_package_version", "os", "shell", "claude_model"):
+        val = payload.get(key)
+        if val is not None:
+            env[key] = val
+    # Capture allowlisted env vars when present.
+    env_vars = payload.get("env_vars")
+    if isinstance(env_vars, dict):
+        env["env_vars"] = dict(env_vars)
+    if env:
+        model.environment = env
+
+
+def _reduce_container_observed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.containers.append(
+        {
+            "registry": payload.get("registry", ""),
+            "image": payload.get("image", ""),
+            "tag": payload.get("tag", ""),
+            "digest": payload.get("digest", ""),
+        }
+    )
+
+
+def _reduce_dependency_observed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.dependencies.append(
+        {
+            "path": payload.get("path", ""),
+            "kind": payload.get("kind", ""),
+            "file_record": payload.get("file_record", ""),
+        }
+    )
+
+
+def _reduce_run_aborted(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    model.aborted = True
+
+
+# --- Agent actions: file edits / prompts / blocked / subagents / tool.completed --------
+
+def _reduce_file_action(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    # An agent file edit (Write/Edit/MultiEdit/NotebookEdit, or an external FileChanged).
+    # Skip edits to the internal provenance store — they are tooling, not the agent's
+    # work product, and must not become workflow steps.
+    payload = event.payload
+    fa_path = str(payload.get("path", ""))
+    if "/.ro-crate-run/" in fa_path or fa_path.startswith(".ro-crate-run/"):
+        return
+    model.agent_activity.file_actions.append({
+        "path": str(payload.get("path", "")),
+        "tool_name": str(payload.get("tool_name", "")),
+        "op": event.event_type.split(".", 1)[1],
+        "timestamp": event.timestamp,
+        "sequence": event.sequence,
+        "step_id": event.step_id,
+        "phase_id": event.phase_id,
+    })
+
+
+def _reduce_prompt(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.agent_activity.prompts.append({
+        "prompt": str(payload.get("prompt", "")),
+        "prompt_hash": str(payload.get("prompt_hash", "")),
+        "timestamp": event.timestamp,
+        "sequence": event.sequence,
+    })
+
+
+def _reduce_tool_blocked(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.agent_activity.blocked_actions.append({
+        "tool_name": str(payload.get("tool_name", "")),
+        "command": str(payload.get("command", "")),
+        "reason": str(payload.get("reason", "")),
+        "timestamp": event.timestamp,
+        "sequence": event.sequence,
+        "kind": "policy",
+    })
+
+
+def _reduce_permission_denied(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.agent_activity.blocked_actions.append({
+        "tool_name": str(payload.get("tool_name", payload.get("tool", ""))),
+        "reason": str(payload.get("reason", payload.get("message", "permission denied"))),
+        "timestamp": event.timestamp,
+        "sequence": event.sequence,
+        "kind": "permission",
+    })
+
+
+def _reduce_tool_failed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.agent_activity.blocked_actions.append({
+        "tool_name": str(payload.get("tool_name", "")),
+        "reason": str(payload.get("error") or payload.get("message") or "tool use failed"),
+        "timestamp": event.timestamp,
+        "sequence": event.sequence,
+        "kind": "tool-failed",
+    })
+
+
+def _reduce_subagent(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.agent_activity.subagents.append({
+        "event": event.event_type,
+        "description": str(
+            payload.get("description")
+            or payload.get("prompt")
+            or payload.get("subagent_type")
+            or ""
+        ),
+        "subagent_type": str(payload.get("subagent_type", "")),
+        "task_id": str(
+            payload.get("task_id") or payload.get("id") or payload.get("agentId") or ""
+        ),
+        "timestamp": event.timestamp,
+        "sequence": event.sequence,
+    })
+
+
+def _reduce_tool_completed(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    tool_name = str(payload.get("tool_name", ""))
+    command = _bash_command(payload)
+    if tool_name in {"AskUserQuestion", "ExitPlanMode", "EnterPlanMode"}:
+        decision = _tool_decision(tool_name, payload, event.timestamp, event.sequence)
+        if decision is not None:
+            model.agent_activity.tool_decisions.append(decision)
+    elif tool_name == "Bash" and command and not _is_rcr_invocation(command):
+        # Substantive raw shell NOT wrapped in rcr run (rcr-wrapped commands are
+        # already captured as execution.command.* -> CommandRecord; rcr/hook
+        # provenance tooling is excluded so it never pollutes the workflow).
+        model.agent_activity.raw_commands.append({
+            "command": command,
+            "timestamp": event.timestamp,
+            "sequence": event.sequence,
+            "step_id": event.step_id,
+        })
+    elif tool_name and tool_name != "Bash":
+        model.agent_activity.tool_uses.append({
+            "tool_name": tool_name,
+            "timestamp": event.timestamp,
+            "sequence": event.sequence,
+        })
+
+
+def _reduce_housekeeping(
+    model: RunModel, event: RcrEvent, commands_by_id: dict[str, CommandRecord]
+) -> None:
+    payload = event.payload
+    model.agent_activity.housekeeping.append({
+        "event": event.event_type,
+        "detail": str(
+            payload.get("new_cwd") or payload.get("path") or payload.get("cwd") or ""
+        ),
+        "timestamp": event.timestamp,
+        "sequence": event.sequence,
+    })
+
+
+def _collapse_agent_activity(model: RunModel) -> None:
+    """Reduce the raw per-event subagent/tool records folded during the loop into
+    already-reduced records (one per task / one per tool), so the mapping builders stay
+    pure 1:1 projectors. This is reduction, so it belongs in the reducer, not the builders.
+    """
+    activity = model.agent_activity
+    activity.subagents = _reduce_subagent_records(activity.subagents)
+    activity.tool_uses = _reduce_tool_use_records(activity.tool_uses)
+
+
+def _reduce_subagent_records(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold raw subagent lifecycle events into one record per task (first-seen order).
+
+    The grouping key is ``task_id`` (falling back to ``seq{sequence}`` when absent) and is
+    stored back as ``task_id`` so the builder's name fallback (`subagent_type or task_id`)
+    resolves it. ``end`` is taken from the completed/stopped event; ``description`` is
+    back-filled from the created/started event; ``sequence``/``timestamp`` stay the first
+    event's, preserving the action's @id and startTime.
+    """
+    by_task: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for s in raw:
+        tid = str(s.get("task_id") or f"seq{s.get('sequence')}")
+        event_type = str(s.get("event", ""))
+        if tid not in by_task:
+            record = dict(s)
+            record["task_id"] = tid
+            by_task[tid] = record
+            order.append(tid)
+        if event_type.endswith(("completed", "stopped")):
+            by_task[tid]["end"] = s.get("timestamp")
+        if event_type.endswith(("created", "started")) and s.get("description"):
+            by_task[tid].setdefault("description", s.get("description"))
+    return [by_task[tid] for tid in order]
+
+
+def _reduce_tool_use_records(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold raw non-Bash tool uses into one record per tool name (first-seen order),
+    carrying the use ``count`` plus first/last timestamps the builder maps 1:1."""
+    records: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for t in raw:
+        name = str(t.get("tool_name", ""))
+        if not name:
+            continue
+        if name not in records:
+            records[name] = {
+                "tool_name": name,
+                "count": 0,
+                "first_ts": t.get("timestamp"),
+                "last_ts": t.get("timestamp"),
+            }
+            order.append(name)
+        records[name]["count"] += 1
+        records[name]["last_ts"] = t.get("timestamp")
+    return [records[name] for name in order]
+
+
+# Registry mapping event_type -> projector. Cohesive families (command/step terminals,
+# file-action ops, subagent lifecycle, housekeeping) share one projector; adding an
+# event type means registering one entry here (plus constants.EVENT_TYPES + dirty_effect).
+_PROJECTORS: dict[str, Projector] = {
+    "workflow.input.declared": _reduce_input_declared,
+    "workflow.output.declared": _reduce_output_declared,
+    "workflow.parameter.declared": _reduce_parameter_declared,
+    "workflow.identified": _reduce_workflow_identified,
+    "file.observed": _reduce_file_observed,
+    "software.observed": _reduce_software_observed,
+    "human.note": _reduce_human_note,
+    "human.decision": _reduce_human_decision,
+    "human.accepted_result": _reduce_accepted_result,
+    "human.rejected_result": _reduce_rejected_result,
+    "workflow.phase.started": _reduce_phase_started,
+    "workflow.phase.completed": _reduce_phase_completed,
+    "workflow.step.started": _reduce_step_started,
+    "workflow.step.identified": _reduce_step_identified,
+    "execution.command.started": _reduce_command_started,
+    "environment.observed": _reduce_environment_observed,
+    "container.observed": _reduce_container_observed,
+    "dependency.lockfile.observed": _reduce_dependency_observed,
+    "run.aborted": _reduce_run_aborted,
+    "human.prompt": _reduce_prompt,
+    "tool.blocked": _reduce_tool_blocked,
+    "permission.denied": _reduce_permission_denied,
+    "tool.failed": _reduce_tool_failed,
+    "tool.completed": _reduce_tool_completed,
+    "file.created": _reduce_file_action,
+    "file.modified": _reduce_file_action,
+    "file.changed": _reduce_file_action,
+    "file.deleted": _reduce_file_action,
+    "environment.cwd.changed": _reduce_housekeeping,
+    "git.worktree.created": _reduce_housekeeping,
+    "git.worktree.removed": _reduce_housekeeping,
+    "conversation.compaction.started": _reduce_housekeeping,
+    "conversation.compaction.completed": _reduce_housekeeping,
+    "tool.batch.completed": _reduce_housekeeping,
+    "permission.requested": _reduce_housekeeping,
+}
+# Step- and command-terminal families share one projector each; register every member of
+# the canonical constant sets so the registry and the vocabulary cannot drift.
+for _step_terminal in STEP_TERMINAL_EVENTS:
+    _PROJECTORS[_step_terminal] = _reduce_step_terminal
+for _command_terminal in COMMAND_TERMINAL_EVENTS:
+    _PROJECTORS[_command_terminal] = _reduce_command_terminal
+for _subagent_event in SUBAGENT_EVENT_TYPES:
+    _PROJECTORS[_subagent_event] = _reduce_subagent
 
 
 def _bash_command(payload: dict[str, Any]) -> str:
@@ -396,18 +687,3 @@ def _is_rcr_invocation(command: str) -> bool:
         return True
     first = stripped.split()[0]
     return Path(first).name == "rcr"
-
-
-def _engine_for_path(path: str) -> str:
-    name = Path(path).name
-    if name == "Snakefile" or path.endswith(".smk"):
-        return "snakemake"
-    if path.endswith(".cwl"):
-        return "cwl"
-    if path.endswith(".nf") or name == "nextflow.config":
-        return "nextflow"
-    if path.endswith(".wdl"):
-        return "wdl"
-    if path.endswith(".ga"):
-        return "galaxy"
-    return "unknown"

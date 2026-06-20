@@ -66,9 +66,10 @@ def handle_hook(
     # Ignore non-dict payloads and never crash on an unrecognized event.
     if not isinstance(payload, dict):
         return HookResult()
-    ctx = ProjectContext.from_cwd(
-        payload.get("cwd") or env.get("CLAUDE_PROJECT_DIR") if env else None, env=env
-    )
+    # Pass only the payload cwd; from_cwd already resolves CLAUDE_PROJECT_DIR from env
+    # and defaults env to os.environ, so folding the project-dir var into the cwd arg
+    # here would both re-implement that fallback and hit a ternary-precedence trap.
+    ctx = ProjectContext.from_cwd(payload.get("cwd"), env=env)
     if not (ctx.state_dir / "state.json").exists():
         # Auto-start (opt-in via RCR_AUTO_START): bootstrap a run on first activity so the
         # agent's actions are captured as the workflow even without an explicit `rcr start`.
@@ -108,14 +109,17 @@ def _on_session_start(
 ) -> HookResult:
     session_id = payload.get("session_id")
     writer.append(
-        "session.started",
+        EVENT_MAP["SessionStart"],
         payload,
         source_kind="claude_hook",
         session_id=session_id,
     )
     # state.json already exists at this point (handle_hook returns early otherwise),
-    # so this SessionStart is resuming an established run.
-    if not _run_is_terminal(read_events(ctx.state_dir)):
+    # so this SessionStart is resuming an established run. Delegate the terminal/active
+    # decision to recovery.is_active_run, the single source for that vocabulary.
+    from .recovery import is_active_run
+
+    if is_active_run(read_events(ctx.state_dir)):
         writer.append(
             "run.resumed",
             {"cwd": str(ctx.cwd), "session_id": session_id},
@@ -201,7 +205,7 @@ def _on_post_tool_use(
             inferred=True,
         )
         return HookResult()
-    writer.append("tool.completed", payload, source_kind="claude_hook")
+    writer.append(EVENT_MAP["PostToolUse"], payload, source_kind="claude_hook")
     return HookResult()
 
 
@@ -211,7 +215,7 @@ def _on_stop(
     from .materialize.builder import checkpoint
     from .validation.validator import validate_run
 
-    writer.append("session.stop.requested", {"mode": state.mode}, source_kind="claude_hook")
+    writer.append(EVENT_MAP["Stop"], {"mode": state.mode}, source_kind="claude_hook")
     checkpoint_rc = 0
     if _is_stale(state):
         try:
@@ -369,12 +373,19 @@ def _dedupe_str(items: list[str]) -> list[str]:
     return ordered
 
 
+# --- Monitored-mode Stop blocking policy (single-sourced as data) -----------
+# These declare *what blocks at Stop in monitored mode*, so the policy can be read
+# (and tested) as data rather than inferred from the if-chain in _stop_blockers.
+# Missing-required-metadata finding codes that block even in monitored mode.
 _REQUIRED_METADATA_CODES = {
     "missing_required_output",
     "metadata_missing",
     "metadata_invalid_json",
     "missing_software_versions",
 }
+# Validation levels whose errors are critical structural failures (corrupt journal,
+# bad state, invalid JSON-LD / RO-Crate) and so block in monitored mode too.
+_BLOCKING_VALIDATION_LEVELS = {"journal", "state", "ro_crate"}
 
 
 def _stop_blockers(
@@ -390,11 +401,11 @@ def _stop_blockers(
     if checkpoint_rc != 0:
         blockers.append("crate materialization failed")
     for finding in report.errors:
-        # Critical structural failures (corrupt journal, bad state, invalid JSON-LD /
-        # RO-Crate) block in monitored mode too; profile/reproducibility quality errors
+        # Critical structural failures and missing-required-metadata block in monitored
+        # mode too (the declared policy above); profile/reproducibility quality errors
         # block only in enforced (via report.status below).
         if (
-            finding.level in {"journal", "state", "ro_crate"}
+            finding.level in _BLOCKING_VALIDATION_LEVELS
             or finding.code in _REQUIRED_METADATA_CODES
         ):
             blockers.append(finding.message)
@@ -410,10 +421,17 @@ def _stop_blockers(
     return _dedupe_str(blockers)
 
 
-def _run_is_terminal(events: list[dict[str, Any]]) -> bool:
-    return any(
-        event.get("event_type") in {"run.finalized", "run.aborted"} for event in events
-    )
+# Cap a command's first line at this many characters for the deny-reason summary,
+# keeping the message readable rather than dumping a whole multi-line command.
+_BYPASS_SUMMARY_MAXLEN = 80
+
+
+def _summarize_command(command: str) -> str:
+    """Return the first line of a command, truncated for a one-line deny reason."""
+    stripped = command.strip()
+    if not stripped:
+        return "command"
+    return stripped.splitlines()[0][:_BYPASS_SUMMARY_MAXLEN]
 
 
 def _detect_raw_bash_bypass(events: list[dict[str, Any]]) -> list[str]:
@@ -426,7 +444,7 @@ def _detect_raw_bash_bypass(events: list[dict[str, Any]]) -> list[str]:
             continue
         command = str(payload.get("tool_input", {}).get("command", ""))
         if _is_substantive_raw(command):
-            summary = command.strip().splitlines()[0][:80] if command.strip() else "command"
+            summary = _summarize_command(command)
             bypass.append(f"raw substantive command bypassed capture: {summary}")
     return _dedupe_str(bypass)
 
@@ -451,7 +469,7 @@ _DESTRUCTIVE_PREFIXES = ("rm ", "rm\t", "shred ", "truncate ", "git clean")
 _EVIDENCE_PATHS = (".ro-crate-run",)
 
 
-def _writes_into_output_roots(command: str, cfg: RcrConfig) -> bool:
+def _writes_into_output_roots(command: str, state: RcrState, cfg: RcrConfig) -> bool:
     roots = list(cfg.output_roots)
     if not roots:
         return False
@@ -487,31 +505,50 @@ def _is_destructive_to_evidence(command: str, state: RcrState, cfg: RcrConfig) -
     )
 
 
-def _is_exfiltration(command: str) -> bool:
+def _is_exfiltration(command: str, state: RcrState, cfg: RcrConfig) -> bool:
     return any(pattern.search(command) for pattern in _EXFIL_PATTERNS)
+
+
+def _is_substantive_raw_policy(command: str, state: RcrState, cfg: RcrConfig) -> bool:
+    """Registry adapter: the substantive-raw catch-all with the uniform signature."""
+    return _is_substantive_raw(command)
+
+
+# Ordered registry of the four enforced-mode blocking policy classes. Each entry is
+# (predicate, reason); _enforced_block_reason returns the reason of the first match.
+# Order IS the precedence: the specific guards (output-root writes, evidence deletion,
+# exfiltration) come before the general substantive catch-all so the more actionable
+# message wins when more than one condition holds. Add a class by adding one entry.
+EnforcedPolicy = Callable[[str, RcrState, RcrConfig], bool]
+_ENFORCED_POLICIES: tuple[tuple[EnforcedPolicy, str], ...] = (
+    (
+        _writes_into_output_roots,
+        "Commands writing into declared output roots must run via rcr run --",
+    ),
+    (
+        _is_destructive_to_evidence,
+        "Destructive commands that delete provenance evidence are blocked in enforced mode",
+    ),
+    (
+        _is_exfiltration,
+        "Command matches a secret-exfiltration / unsafe pattern and is blocked",
+    ),
+    (
+        _is_substantive_raw_policy,
+        "Substantive commands must use rcr run -- in enforced mode",
+    ),
+)
 
 
 def _enforced_block_reason(command: str, state: RcrState, cfg: RcrConfig) -> str | None:
     """Return the reason an enforced-mode Bash command is blocked, or None to allow it.
 
-    The specific guards (output-root writes, evidence deletion, exfiltration) are
-    checked before the general substantive-command catch-all so the more actionable
-    message wins when more than one condition holds.
+    Iterates the ordered ``_ENFORCED_POLICIES`` registry and returns the first match's
+    reason, so precedence is explicit data and the policy set can be introspected.
     """
-    # Blocks commands that write into a declared output root; checked first so the
-    # more specific message wins.
-    if _writes_into_output_roots(command, cfg):
-        return "Commands writing into declared output roots must run via rcr run --"
-    # Blocks commands that delete provenance evidence; checked before the general
-    # substantive test so the evidence-protection message wins.
-    if _is_destructive_to_evidence(command, state, cfg):
-        return "Destructive commands that delete provenance evidence are blocked in enforced mode"
-    # Blocks secret-exfiltration / unsafe network patterns.
-    if _is_exfiltration(command):
-        return "Command matches a secret-exfiltration / unsafe pattern and is blocked"
-    # Blocks raw substantive Bash; the catch-all, checked last.
-    if _is_substantive_raw(command):
-        return "Substantive commands must use rcr run -- in enforced mode"
+    for predicate, reason in _ENFORCED_POLICIES:
+        if predicate(command, state, cfg):
+            return reason
     return None
 
 

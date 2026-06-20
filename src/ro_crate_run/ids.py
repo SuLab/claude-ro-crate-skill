@@ -9,6 +9,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .fs import write_json
+
 ID_MAP_SCHEMA_VERSION = "1.0.0"
 
 
@@ -58,22 +60,32 @@ def software_entity_id(name: str) -> str:
     return f"#software/{slugify(name)}"
 
 
+def step_entity_id(step_id: str) -> str:
+    """Return a stable ``#step/<slug>`` id for the given workflow step id."""
+    return f"#step/{slugify(step_id)}"
+
+
 class IdMap:
+    """Persisted allocator/cache mapping events, steps, and software to crate ids.
+
+    Backed by id-map.json under the state dir; a missing file starts from the
+    canonical :func:`new_id_map` skeleton. The cache is derived, never a source
+    of truth.
+    """
+
     def __init__(self, state_dir: Path) -> None:
         self.path = state_dir / "id-map.json"
         if self.path.exists():
             self.data: dict[str, Any] = json.loads(self.path.read_text())
         else:
-            self.data = {
-                "schema_version": "1.0.0",
-                "event_to_entity": {},
-                "path_to_entity": {},
-                "step_to_entity": {},
-                "profile_to_entity": {},
-                "software_to_entity": {},
-            }
+            self.data = new_id_map()
 
     def entity_for_event(self, event_id: str, kind: str = "action") -> str:
+        """Return the urn:uuid for an event, minting and persisting on first use.
+
+        Keyed by ``{kind}:{event_id}`` so the same event id can carry distinct
+        ids per kind (callers pass ``control`` alongside the default ``action``).
+        """
         key = f"{kind}:{event_id}"
         mapping = self.data.setdefault("event_to_entity", {})
         if key not in mapping:
@@ -81,26 +93,22 @@ class IdMap:
             self.save()
         return str(mapping[key])
 
-    def entity_for_path(self, path: str) -> str:
-        mapping = self.data.setdefault("path_to_entity", {})
-        if path not in mapping:
-            mapping[path] = path
-            self.save()
-        return str(mapping[path])
-
     def entity_for_step(self, step_id: str) -> str:
+        """Return the cached ``#step/<slug>`` id for a step, persisting on first use."""
         mapping = self.data.setdefault("step_to_entity", {})
         if step_id not in mapping:
-            mapping[step_id] = f"#step/{slugify(step_id)}"
+            mapping[step_id] = step_entity_id(step_id)
             self.save()
         return str(mapping[step_id])
 
     def software_entity_id(self, name: str) -> str:
+        """Return the cached ``#software/<slug>`` id for software, persisting on first use."""
         mapping = self.data.setdefault("software_to_entity", {})
         if name not in mapping:
-            mapping[name] = f"#software/{slugify(name)}"
+            mapping[name] = software_entity_id(name)
             self.save()
         return str(mapping[name])
 
     def save(self) -> None:
-        self.path.write_text(json.dumps(self.data, indent=2, sort_keys=True) + "\n")
+        """Write id-map.json in the canonical deterministic JSON form."""
+        write_json(self.path, self.data)

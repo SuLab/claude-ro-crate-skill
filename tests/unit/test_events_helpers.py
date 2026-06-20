@@ -7,7 +7,6 @@ import pytest
 from ro_crate_run.events import (
     ACTOR_NAMES,
     ACTOR_TYPES,
-    actor_for_role,
     actor_for_source,
     canonical_json,
     crate_actor_id,
@@ -54,14 +53,14 @@ def test_actor_for_source_matches_frozen_table(
     source_kind: str, expected: tuple[str, str, str]
 ) -> None:
     kind, actor_id, name = expected
-    actor = actor_for_source(source_kind, "ignored-name")
+    actor = actor_for_source(source_kind)
     assert actor.type == kind
     assert actor.id == actor_id
     assert actor.name == name
 
 
 def test_actor_for_source_unknown_falls_back_to_rcr() -> None:
-    actor = actor_for_source("totally-unknown-source", "x")
+    actor = actor_for_source("totally-unknown-source")
     assert actor.type == "SoftwareApplication"
     assert actor.id == "actor:rcr"
     assert actor.name == "RO-Crate Run"
@@ -80,23 +79,6 @@ def test_crate_actor_id_uses_slash_namespace() -> None:
 def test_engine_actor_id() -> None:
     assert engine_actor_id("cwl") == "#actor/engine/cwl"
     assert engine_actor_id("nextflow") == "#actor/engine/nextflow"
-
-
-@pytest.mark.parametrize("role", ["human", "rcr", "claude-code", "ci"])
-def test_actor_for_role_derives_from_roster(role: str) -> None:
-    actor = actor_for_role(role)
-    assert actor == {
-        "@id": event_actor_id(role),
-        "@type": ACTOR_TYPES[role],
-        "name": ACTOR_NAMES[role],
-    }
-
-
-def test_actor_for_role_human_is_person() -> None:
-    actor = actor_for_role("human")
-    assert actor["@type"] == "Person"
-    assert actor["name"] == "Human operator"
-    assert actor["@id"] == "actor:human"
 
 
 def test_roster_keys_are_aligned() -> None:

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import DEFAULT_STATE_DIR
-from .git import _git
+from .git import git_toplevel
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ class ProjectContext:
 
 
 def _discover_project(cwd: Path) -> Path:
-    top = _git(["rev-parse", "--show-toplevel"], cwd)
+    top = git_toplevel(cwd)
     if top:
         return Path(top).resolve()
     for path in [cwd, *cwd.parents]:

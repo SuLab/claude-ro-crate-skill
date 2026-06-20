@@ -93,15 +93,15 @@ def test_run_model_has_tool_decisions_field_default() -> None:
         run_id="r", title="t", description="d", created_at="x", updated_at="x",
         selected_profile="process", requested_profile="process", profile_uri="", mode="monitored",
     )
-    assert model.tool_decisions == []
+    assert model.agent_activity.tool_decisions == []
 
 
 def test_ask_user_question_decision_populated(tmp_path: Path) -> None:
     state_dir = _seed_run(tmp_path)
     _append_post_tool(state_dir, _ask_payload(str(tmp_path)))
     model = build_run_model(state_dir)
-    assert len(model.tool_decisions) == 1
-    d = model.tool_decisions[0]
+    assert len(model.agent_activity.tool_decisions) == 1
+    d = model.agent_activity.tool_decisions[0]
     assert d["tool"] == "AskUserQuestion"
     assert d["question"] == "Which database backend should we use?"
     assert d["options"] == ["Postgres", "SQLite"]
@@ -116,7 +116,7 @@ def test_plan_mode_decisions_populated(tmp_path: Path) -> None:
     _append_post_tool(state_dir, _exit_payload(str(tmp_path)))
     _append_post_tool(state_dir, _enter_payload(str(tmp_path)))
     model = build_run_model(state_dir)
-    by_tool = {d["tool"]: d for d in model.tool_decisions}
+    by_tool = {d["tool"]: d for d in model.agent_activity.tool_decisions}
     assert set(by_tool) == {"ExitPlanMode", "EnterPlanMode"}
     assert by_tool["ExitPlanMode"]["plan"] == "1. Build\n2. Run"
     assert by_tool["ExitPlanMode"]["question"] is None
@@ -130,10 +130,10 @@ def test_decision_tools_not_double_counted_as_tool_uses(tmp_path: Path) -> None:
     _append_post_tool(state_dir, _ask_payload(str(tmp_path)))
     _append_post_tool(state_dir, _exit_payload(str(tmp_path)))
     model = build_run_model(state_dir)
-    names = {t["tool_name"] for t in model.tool_uses}
+    names = {t["tool_name"] for t in model.agent_activity.tool_uses}
     assert "AskUserQuestion" not in names
     assert "ExitPlanMode" not in names
-    assert len(model.tool_decisions) == 2
+    assert len(model.agent_activity.tool_decisions) == 2
 
 
 def test_multi_question_ask_flattened(tmp_path: Path) -> None:
@@ -157,8 +157,8 @@ def test_multi_question_ask_flattened(tmp_path: Path) -> None:
     }
     _append_post_tool(state_dir, payload)
     model = build_run_model(state_dir)
-    assert len(model.tool_decisions) == 1
-    d = model.tool_decisions[0]
+    assert len(model.agent_activity.tool_decisions) == 1
+    d = model.agent_activity.tool_decisions[0]
     assert d["question"] == "Q1?; Q2?"
     assert d["options"] == ["A", "B", "C"]
     assert d["answer"] == "A; C"
@@ -178,7 +178,7 @@ def test_decision_extraction_robust_to_missing_keys(tmp_path: Path) -> None:
          "tool_input": {}, "tool_response": {}},
     )
     model = build_run_model(state_dir)
-    assert model.tool_decisions == []
+    assert model.agent_activity.tool_decisions == []
 
 
 def test_unit_extract_direct_from_journal_dict(tmp_path: Path) -> None:
@@ -186,7 +186,7 @@ def test_unit_extract_direct_from_journal_dict(tmp_path: Path) -> None:
     state_dir = _seed_run(tmp_path)
     _append_post_tool(state_dir, _ask_payload(str(tmp_path)))
     model = build_run_model(state_dir)
-    d = model.tool_decisions[0]
+    d = model.agent_activity.tool_decisions[0]
     assert set(d.keys()) == {
         "sequence", "timestamp", "tool", "question", "options", "answer", "plan",
     }

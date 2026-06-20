@@ -9,14 +9,24 @@ into crate actions; the synthesized agent workflow's steps are derived from thes
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ro_crate_run import constants
+from ro_crate_run.events import crate_actor_id
 from ro_crate_run.ids import IdMap, file_ref, relative_file_id, software_entity_id
 from ro_crate_run.models import CommandRecord, RunModel
 
-from ._helpers import _content_size, command_action_type
+from ._helpers import (
+    FILE_OP_TYPE,
+    _content_size,
+    command_action_type,
+    fragment_id,
+    ref,
+    root_creative_work,
+    root_ref,
+)
 
 
 def _agent_action(
@@ -27,7 +37,7 @@ def _agent_action(
     start: Any,
     end: Any,
     *,
-    agent: str = "#actor/claude-code",
+    agent: str = crate_actor_id("claude-code"),
     status: str = constants.ACTION_STATUS_COMPLETED,
     **extra: Any,
 ) -> dict[str, Any]:
@@ -44,8 +54,8 @@ def _agent_action(
         "description": description,
         "startTime": start,
         "endTime": end,
-        "actionStatus": {"@id": status},
-        "agent": {"@id": agent},
+        "actionStatus": ref(status),
+        "agent": ref(agent),
     }
     action.update(extra)
     return action
@@ -77,9 +87,9 @@ def build_command_action(
         "description": "Executed command; full invocation recorded in command sidecar.",
         "startTime": cmd.started_at,
         "endTime": cmd.ended_at or cmd.started_at,
-        "actionStatus": {"@id": status},
-        "agent": {"@id": "#actor/human"},
-        "instrument": {"@id": instrument},
+        "actionStatus": ref(status),
+        "agent": ref(crate_actor_id("human")),
+        "instrument": ref(instrument),
         "object": [file_ref(Path(p), proj) for p in cmd.inputs],
         "result": [file_ref(Path(p), proj) for p in cmd.outputs],
     }
@@ -88,7 +98,7 @@ def build_command_action(
     if env_ids:
         # L5: Process 0.5 conditional SHOULD — env vars affecting the run SHOULD be on the
         # action via `environment` → PropertyValue. Refs only; entities come from build_environment.
-        action["environment"] = [{"@id": eid} for eid in env_ids]
+        action["environment"] = [ref(eid) for eid in env_ids]
     entities: list[dict[str, Any]] = [action]
     for rel, label in [
         (cmd.sidecar, "invocation record"),
@@ -101,7 +111,7 @@ def build_command_action(
                 "@type": "File",
                 "name": f"{cmd.command_id} {label}",
                 "encodingFormat": "application/json" if rel.endswith(".json") else "text/plain",
-                "about": {"@id": cmd.action_id},
+                "about": ref(cmd.action_id),
             }
             # Base 1.2 SHOULD — contentSize on the sidecar/log File entity.
             size = _content_size(rel, project_dir)
@@ -124,13 +134,8 @@ def _action_name(cmd: CommandRecord) -> str:
 # Agent action families: the agent's own actions ARE the workflow
 # ---------------------------------------------------------------------------
 
-
-_FILE_OP_TYPE = {
-    "created": "CreateAction",
-    "modified": "UpdateAction",
-    "changed": "UpdateAction",
-    "deleted": "DeleteAction",
-}
+# Max characters of a raw shell command kept as the action name (the rest is in the command).
+_RAW_COMMAND_NAME_MAXLEN = 100
 
 
 def build_file_actions(
@@ -146,7 +151,7 @@ def build_file_actions(
     """
     entities: list[dict[str, Any]] = []
     seen_tools: set[str] = set()
-    for fa in model.file_actions:
+    for fa in model.agent_activity.file_actions:
         path = str(fa.get("path", ""))
         if not path:
             continue
@@ -161,17 +166,16 @@ def build_file_actions(
             seen_tools.add(tool_id)
             entities.append({"@id": tool_id, "@type": "SoftwareApplication", "name": tool})
         op = str(fa.get("op", "modified"))
-        ref = {"@id": rel}
         action = _agent_action(
-            f"#file-action/{fa.get('sequence')}",
-            _FILE_OP_TYPE.get(op, "UpdateAction"),
+            fragment_id("file-action", fa.get("sequence")),
+            FILE_OP_TYPE.get(op, "UpdateAction"),
             f"{tool} {os.path.basename(rel)}",
             f"Claude agent {op} {rel} via the {tool} tool.",
             fa.get("timestamp"),
             fa.get("timestamp"),
-            instrument={"@id": tool_id},
+            instrument=ref(tool_id),
         )
-        action["object" if op == "deleted" else "result"] = [ref]
+        action["object" if op == "deleted" else "result"] = [ref(rel)]
         entities.append(action)
     return entities
 
@@ -180,7 +184,7 @@ def build_raw_command_actions(model: RunModel) -> list[dict[str, Any]]:
     """Emit a CreateAction for each substantive raw shell command (not via rcr run)."""
     entities: list[dict[str, Any]] = []
     seen_tools: set[str] = set()
-    for rc in model.raw_commands:
+    for rc in model.agent_activity.raw_commands:
         command = str(rc.get("command", "")).strip()
         if not command:
             continue
@@ -191,47 +195,39 @@ def build_raw_command_actions(model: RunModel) -> list[dict[str, Any]]:
             entities.append({"@id": tool_id, "@type": "SoftwareApplication", "name": argv0})
         entities.append(
             _agent_action(
-                f"#raw-command/{rc.get('sequence')}",
+                fragment_id("raw-command", rc.get("sequence")),
                 "CreateAction",
-                command[:100],
+                command[:_RAW_COMMAND_NAME_MAXLEN],
                 "Raw shell command run by the agent outside rcr run.",
                 rc.get("timestamp"),
                 rc.get("timestamp"),
-                instrument={"@id": tool_id},
+                instrument=ref(tool_id),
                 # Process 0.5 — object MAY. rcr cannot infer the outputs of an unwrapped bash
                 # command (so result is intentionally absent), but the command operates on the
                 # crate's root dataset, so reference it via `object` to improve SHOULD-quality.
-                object=[{"@id": "./"}],
+                object=[root_ref()],
             )
         )
     return entities
 
 
 def build_subagent_actions(model: RunModel) -> list[dict[str, Any]]:
-    """Emit an Action for each subagent/Task the agent dispatched."""
-    by_task: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for s in model.subagents:
-        tid = str(s.get("task_id") or f"seq{s.get('sequence')}")
-        event = str(s.get("event", ""))
-        if tid not in by_task:
-            by_task[tid] = dict(s)
-            order.append(tid)
-        if event.endswith(("completed", "stopped")):
-            by_task[tid]["end"] = s.get("timestamp")
-        if event.endswith(("created", "started")) and s.get("description"):
-            by_task[tid].setdefault("description", s.get("description"))
+    """Emit an Action for each subagent/Task the agent dispatched.
+
+    ``agent_activity.subagents`` is already reduced (one record per task; lifecycle folding
+    lives in the reducer), so this is a pure 1:1 mapping. ``task_id`` is the resolved grouping
+    key and stands in for the subagent name when ``subagent_type`` is absent.
+    """
     entities: list[dict[str, Any]] = []
-    for tid in order:
-        s = by_task[tid]
+    for s in model.agent_activity.subagents:
         # OrganizeAction is reserved (Provenance 0.5) for the engine-orchestration hierarchy
         # (instrument=engine, object=ControlActions, result=workflow CreateAction). A subagent
         # dispatch has none of those roles, so it is a generic Action.
         entities.append(
             _agent_action(
-                f"#subagent/{s.get('sequence')}",
+                fragment_id("subagent", s.get("sequence")),
                 "Action",
-                f"Dispatch subagent {s.get('subagent_type') or tid}",
+                f"Dispatch subagent {s.get('subagent_type') or s.get('task_id')}",
                 str(s.get("description") or "Subagent task dispatched by the agent."),
                 s.get("timestamp"),
                 s.get("end", s.get("timestamp")),
@@ -243,12 +239,12 @@ def build_subagent_actions(model: RunModel) -> list[dict[str, Any]]:
 def build_blocked_actions(model: RunModel) -> list[dict[str, Any]]:
     """Emit a FailedActionStatus Action for each blocked tool call / denied permission."""
     entities: list[dict[str, Any]] = []
-    for b in model.blocked_actions:
+    for b in model.agent_activity.blocked_actions:
         reason = str(b.get("reason") or "blocked")
         label = "Failed" if b.get("kind") == "tool-failed" else "Blocked"
         entities.append(
             _agent_action(
-                f"#blocked/{b.get('sequence')}",
+                fragment_id("blocked", b.get("sequence")),
                 "Action",
                 f"{label}: {b.get('tool_name') or b.get('kind') or 'action'}",
                 reason,
@@ -264,39 +260,37 @@ def build_blocked_actions(model: RunModel) -> list[dict[str, Any]]:
 def build_prompts(model: RunModel) -> list[dict[str, Any]]:
     """Emit a CreativeWork for each user prompt (the run's instruction provenance)."""
     entities: list[dict[str, Any]] = []
-    for p in model.prompts:
-        entities.append({
-            "@id": f"#prompt/{p.get('sequence')}",
-            "@type": "CreativeWork",
-            "name": f"User prompt {p.get('sequence')}",
-            "text": str(p.get("prompt", "")),
-            "about": {"@id": "./"},
-        })
+    for p in model.agent_activity.prompts:
+        entities.append(
+            root_creative_work(
+                fragment_id("prompt", p.get("sequence")),
+                f"User prompt {p.get('sequence')}",
+                str(p.get("prompt", "")),
+            )
+        )
     return entities
 
 
 def build_tool_uses(model: RunModel) -> list[dict[str, Any]]:
-    """Emit one Action per distinct non-file, non-Bash tool the agent used (with a count)."""
-    counts: dict[str, int] = {}
-    first_ts: dict[str, Any] = {}
-    last_ts: dict[str, Any] = {}
-    for t in model.tool_uses:
+    """Emit one Action per distinct non-file, non-Bash tool the agent used (with a count).
+
+    ``agent_activity.tool_uses`` is already reduced (one record per tool with ``count`` and
+    first/last timestamps; the aggregation lives in the reducer), so this is a 1:1 mapping.
+    """
+    entities: list[dict[str, Any]] = []
+    for t in model.agent_activity.tool_uses:
         name = str(t.get("tool_name", ""))
         if not name:
             continue
-        counts[name] = counts.get(name, 0) + 1
-        first_ts.setdefault(name, t.get("timestamp"))
-        last_ts[name] = t.get("timestamp")
-    entities: list[dict[str, Any]] = []
-    for name, count in counts.items():
+        count = t.get("count", 1)
         entities.append(
             _agent_action(
-                f"#tool-use/{name}",
+                fragment_id("tool-use", name),
                 "Action",
                 f"Used {name} ({count}x)",
                 f"The agent used the {name} tool {count} time(s).",
-                first_ts.get(name),
-                last_ts.get(name),
+                t.get("first_ts"),
+                t.get("last_ts"),
             )
         )
     return entities
@@ -305,12 +299,12 @@ def build_tool_uses(model: RunModel) -> list[dict[str, Any]]:
 def build_housekeeping(model: RunModel) -> list[dict[str, Any]]:
     """Emit an Action for each housekeeping event (cwd change, worktree, compaction)."""
     entities: list[dict[str, Any]] = []
-    for h in model.housekeeping:
+    for h in model.agent_activity.housekeeping:
         event = str(h.get("event", ""))
         detail = str(h.get("detail", ""))
         entities.append(
             _agent_action(
-                f"#housekeeping/{h.get('sequence')}",
+                fragment_id("housekeeping", h.get("sequence")),
                 "Action",
                 event.replace(".", " ").strip() or "housekeeping",
                 f"{event}{': ' + detail if detail else ''}",
@@ -327,15 +321,15 @@ def build_results(model: RunModel) -> list[dict[str, Any]]:
     for idx, r in enumerate(model.results, start=1):
         accepted = bool(r.get("accepted"))
         entity = _agent_action(
-            f"#result/{idx}",
+            fragment_id("result", idx),
             "AssessAction",
             "Accepted result" if accepted else "Rejected result",
             str(r.get("text", "")),
             r.get("timestamp"),
             r.get("timestamp"),
-            agent="#actor/human",
+            agent=crate_actor_id("human"),
             status=constants.completed_or_failed(accepted),
-            object={"@id": "./"},
+            object=root_ref(),
         )
         if not accepted:
             # A FailedActionStatus action must carry an error (L3 profile rule).
@@ -353,17 +347,41 @@ def build_phase_actions(model: RunModel) -> list[dict[str, Any]]:
         # work-phase grouping is a generic Action. The grouping is Active until completed.
         entities.append(
             _agent_action(
-                f"#phase/{idx}",
+                fragment_id("phase", idx),
                 "Action",
                 f"Phase: {name}",
                 f"Project phase {name!r} ({status or 'started'}).",
                 phase.get("timestamp"),
                 phase.get("end_timestamp") or phase.get("timestamp"),
-                agent="#actor/human",
+                agent=crate_actor_id("human"),
                 status=constants.completed_or_active(status == "completed"),
             )
         )
     return entities
+
+
+@dataclass(frozen=True)
+class _AgentActionCtx:
+    """Inputs an agent-action family may need beyond the model (file-policy aware families)."""
+
+    project_dir: os.PathLike[str] | str
+    emitted_file_ids: set[str] | None
+
+
+# The agent-action families, in emission order. Each adapter takes (model, ctx) so a new
+# family is added by appending one entry; build_workflow_timeline consumes the ordered result,
+# so the order here is load-bearing and must stay stable.
+_AGENT_ACTION_FAMILIES: list[Callable[[RunModel, _AgentActionCtx], list[dict[str, Any]]]] = [
+    lambda model, ctx: build_file_actions(model, ctx.project_dir, ctx.emitted_file_ids),
+    lambda model, ctx: build_raw_command_actions(model),
+    lambda model, ctx: build_subagent_actions(model),
+    lambda model, ctx: build_blocked_actions(model),
+    lambda model, ctx: build_prompts(model),
+    lambda model, ctx: build_tool_uses(model),
+    lambda model, ctx: build_housekeeping(model),
+    lambda model, ctx: build_results(model),
+    lambda model, ctx: build_phase_actions(model),
+]
 
 
 def build_agent_actions(
@@ -372,14 +390,8 @@ def build_agent_actions(
     emitted_file_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate every agent-action family into crate entities."""
+    ctx = _AgentActionCtx(project_dir, emitted_file_ids)
     entities: list[dict[str, Any]] = []
-    entities += build_file_actions(model, project_dir, emitted_file_ids)
-    entities += build_raw_command_actions(model)
-    entities += build_subagent_actions(model)
-    entities += build_blocked_actions(model)
-    entities += build_prompts(model)
-    entities += build_tool_uses(model)
-    entities += build_housekeeping(model)
-    entities += build_results(model)
-    entities += build_phase_actions(model)
+    for family in _AGENT_ACTION_FAMILIES:
+        entities += family(model, ctx)
     return entities

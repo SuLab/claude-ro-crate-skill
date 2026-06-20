@@ -206,22 +206,24 @@ def test_l8_event_journal_has_contentsize(tmp_path: Path, monkeypatch) -> None:
 
 def test_l6_build_tool_decisions_helper() -> None:
     model = SimpleNamespace(
-        tool_decisions=[
-            {
-                "sequence": 5,
-                "timestamp": "2026-06-20T00:00:00Z",
-                "tool": "AskUserQuestion",
-                "question": "Pick one",
-                "options": ["a", "b"],
-                "answer": "a",
-            },
-            {
-                "sequence": 7,
-                "timestamp": "2026-06-20T00:01:00Z",
-                "tool": "ExitPlanMode",
-                "plan": "do X then Y",
-            },
-        ]
+        agent_activity=SimpleNamespace(
+            tool_decisions=[
+                {
+                    "sequence": 5,
+                    "timestamp": "2026-06-20T00:00:00Z",
+                    "tool": "AskUserQuestion",
+                    "question": "Pick one",
+                    "options": ["a", "b"],
+                    "answer": "a",
+                },
+                {
+                    "sequence": 7,
+                    "timestamp": "2026-06-20T00:01:00Z",
+                    "tool": "ExitPlanMode",
+                    "plan": "do X then Y",
+                },
+            ]
+        )
     )
 
     ents = _build_tool_decisions(model)
@@ -238,9 +240,11 @@ def test_l6_build_tool_decisions_helper() -> None:
     assert plan["text"] == "do X then Y"
 
 
-def test_l6_build_tool_decisions_defensive_without_field() -> None:
-    # Builder must tolerate a model that lacks the tool_decisions field.
-    assert _build_tool_decisions(SimpleNamespace()) == []
+def test_l6_build_tool_decisions_empty_yields_no_entities() -> None:
+    # A run model that recorded no human tool decisions produces no decision entities.
+    assert _build_tool_decisions(
+        SimpleNamespace(agent_activity=SimpleNamespace(tool_decisions=[]))
+    ) == []
 
 
 def test_l6_decisions_materialized_in_crate_and_mentioned(tmp_path: Path, monkeypatch) -> None:
@@ -249,7 +253,7 @@ def test_l6_decisions_materialized_in_crate_and_mentioned(tmp_path: Path, monkey
     state_dir = tmp_path / ".ro-crate-run"
     model = build_run_model(state_dir, None)
     # Tool decisions use the #tool-decision/<sequence> @id namespace.
-    model.tool_decisions = [  # type: ignore[attr-defined]
+    model.agent_activity.tool_decisions = [  # type: ignore[attr-defined]
         {
             "sequence": 99,
             "timestamp": "2026-06-20T00:00:00Z",
