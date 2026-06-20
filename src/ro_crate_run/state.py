@@ -170,5 +170,7 @@ def detect_output_changes(state_dir: Path, state: RcrState, max_bytes: int) -> b
 
 
 def run_is_active(state_dir: Path) -> bool:
-    terminal = {"run.finalized", "run.aborted"}
-    return not any(e.get("event_type") in terminal for e in read_events(state_dir))
+    # Thin convenience wrapper; delegates to the single source of truth to avoid a
+    # second, drift-prone copy of the terminal-event logic.
+    from .recovery import is_active_run
+    return is_active_run(read_events(state_dir))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 JsonDict = dict[str, Any]
@@ -275,12 +275,6 @@ class RunModel:
     prompts: list[JsonDict] = field(default_factory=list)           # human.prompt
     tool_uses: list[JsonDict] = field(default_factory=list)         # other tool.completed (Read/Grep/MCP/...)
     housekeeping: list[JsonDict] = field(default_factory=list)      # cwd.changed / worktree.* / compaction.*
-
-
-def dataclass_to_dict(value: Any) -> Any:
-    if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
-    return value
 
 
 def strip_none(value: Any) -> Any:

@@ -56,11 +56,3 @@ def file_record(path: Path, project_root: Path, max_hash_bytes: int) -> dict[str
     return record
 
 
-def should_copy_file(path: Path, project_root: Path, explicit_permission: bool = False) -> bool:
-    if explicit_permission:
-        return True
-    try:
-        path.resolve().relative_to(project_root.resolve())
-        return True
-    except ValueError:
-        return False

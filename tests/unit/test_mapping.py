@@ -390,20 +390,3 @@ def test_build_parameter_connections_optional() -> None:
     assert ent["targetParameter"] == {"@id": "#param/b"}
 
 
-# ---------------------------------------------------------------------------
-# Task 11: selection_confidence
-# ---------------------------------------------------------------------------
-
-
-def test_selection_confidence_levels() -> None:
-    assert mapping.selection_confidence(_model()) == "low"  # nothing observed
-    one_cmd = _model()
-    one_cmd.commands = [_cmd(terminal_status="completed")]
-    assert mapping.selection_confidence(one_cmd) == "medium"
-    rich = _model(
-        selected_profile="provenance",
-        workflow={"path": "wf.cwl", "engine": "cwl"},
-    )
-    rich.steps = {"a": {}, "b": {}}
-    rich.commands = [_cmd(step_id="a"), _cmd(step_id="b")]
-    assert mapping.selection_confidence(rich) == "high"

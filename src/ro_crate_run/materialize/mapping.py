@@ -989,10 +989,3 @@ def build_parameter_connections(model: RunModel) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def selection_confidence(model: RunModel) -> str:
-    """Return ``'high'``/``'medium'``/``'low'`` based on provenance evidence."""
-    if model.workflow and model.steps and model.commands:
-        return "high"
-    if model.commands or model.workflow:
-        return "medium"
-    return "low"

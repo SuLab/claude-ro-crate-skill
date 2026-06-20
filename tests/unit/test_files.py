@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ro_crate_run.files import file_record, sha256_file, should_copy_file
+from ro_crate_run.files import file_record, sha256_file
 
 
 def test_sha256_file(tmp_path: Path) -> None:
@@ -22,12 +22,17 @@ def test_large_file_skip_reason(tmp_path: Path) -> None:
     assert record["hash_skip_reason"] == "larger_than_policy"
 
 
-def test_symlink_outside_root_is_not_copied(tmp_path: Path) -> None:
+def test_symlink_outside_root_resolves_out_of_root(tmp_path: Path) -> None:
+    # The production file resolver (_safe_resolve, used by plan_file_inclusion) rejects a
+    # symlink whose target escapes the project root, so it becomes an out-of-root reference
+    # and is never copied into the crate.
+    from ro_crate_run.materialize.files import _safe_resolve
+
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret")
     link = tmp_path / "link.txt"
     link.symlink_to(outside)
-    assert should_copy_file(link, project_root=tmp_path, explicit_permission=False) is False
+    assert _safe_resolve(Path("link.txt"), tmp_path) is None
 
 
 def test_capture_diff_returns_none_outside_repo(tmp_path: Path) -> None:
