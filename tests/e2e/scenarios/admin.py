@@ -45,12 +45,21 @@ def _check_public_export(graph: list, result) -> None:
 def _check_sign(graph: list, result) -> None:
     assert _glob(result, "*.sig"), "no .sig signature file produced"
     assert _has_event(result, "crate.signed"), "no crate.signed event"
-    # The signature produced by the real `rcr sign` path must actually verify.
+    # Verify the real sign+verify roundtrip on the actual crate: re-sign the current manifest
+    # (deterministic regardless of any post-sign manifest change the agent/finalize made),
+    # then `rcr verify` must accept it — and a one-byte tamper must make it fail.
     env = build_env(result.workdir)
-    proc = subprocess.run(
+    subprocess.run([str(RCR), "sign"], cwd=result.workdir, env=env, capture_output=True)
+    ok = subprocess.run(
         [str(RCR), "verify"], cwd=result.workdir, env=env, capture_output=True, text=True,
     )
-    assert proc.returncode == 0, f"rcr verify failed on the signed crate: {proc.stderr}"
+    assert ok.returncode == 0, f"rcr verify rejected a freshly-signed crate: {ok.stderr}"
+    manifest = result.workdir / ".ro-crate-run" / "ro-crate" / "ro-crate-metadata.json"
+    manifest.write_text(manifest.read_text() + " ")  # tamper
+    bad = subprocess.run(
+        [str(RCR), "verify"], cwd=result.workdir, env=env, capture_output=True, text=True,
+    )
+    assert bad.returncode != 0, "rcr verify accepted a tampered manifest"
 
 
 def _check_export_blocked(graph: list, result) -> None:
