@@ -274,6 +274,10 @@ class RunModel:
     prompts: list[JsonDict] = field(default_factory=list)           # human.prompt
     tool_uses: list[JsonDict] = field(default_factory=list)         # other tool.completed (Read/Grep/MCP/...)
     housekeeping: list[JsonDict] = field(default_factory=list)      # cwd.changed / worktree.* / compaction.*
+    # Human decision points captured via PostToolUse on AskUserQuestion / Exit/EnterPlanMode.
+    # Each dict: {"sequence": int, "timestamp": str, "tool": str, "question": str|None,
+    #             "options": list[str], "answer": str|None, "plan": str|None}.
+    tool_decisions: list[JsonDict] = field(default_factory=list)
 
 
 def strip_none(value: Any) -> Any:

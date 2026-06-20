@@ -28,6 +28,11 @@ from ro_crate_run.validation.validator import validate_run
 from .files import log_should_copy, plan_file_inclusion
 from .run_model import build_run_model
 
+# L3: the additional profile permalinks a workflow/provenance crate's root SHOULD also
+# declare (WfRC 0.5 is a superset of Process Run Crate 0.5 + Workflow RO-Crate 1.0).
+PROCESS_PROFILE_URI = "https://w3id.org/ro/wfrun/process/0.5"
+WORKFLOW_RO_CRATE_URI = "https://w3id.org/workflowhub/workflow-ro-crate/1.0"
+
 
 def checkpoint(state_dir: Path, requested_profile: str = "auto", *, lock_timeout: float = 30.0) -> int:
     with FileLock(str(Path(state_dir) / "checkpoint.lock"), timeout=lock_timeout):
@@ -170,11 +175,32 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     graph.append(
         {
             "@id": model.profile_uri,
-            "@type": "Profile",
+            # L1 (RO-Crate 1.2 SHOULD): a contextual Profile entity's @type SHOULD be an array
+            # including CreativeWork.
+            "@type": ["CreativeWork", "Profile"],
             "name": f"{model.selected_profile.title()} Run Crate",
             "version": "0.5",
         }
     )
+
+    # L3 (WfRC 0.5 SHOULD): a workflow/provenance crate's root conformsTo SHOULD also declare
+    # the Process Run Crate 0.5 + Workflow RO-Crate 1.0 profiles, and EACH listed profile MUST
+    # link to a contextual Profile entity (RO-Crate 1.2 MUST).
+    if model.selected_profile in {"workflow", "provenance"}:
+        extra_profiles = {
+            PROCESS_PROFILE_URI: "Process Run Crate",
+            WORKFLOW_RO_CRATE_URI: "Workflow RO-Crate",
+        }
+        for uri, label in extra_profiles.items():
+            if {"@id": uri} not in root["conformsTo"]:
+                root["conformsTo"].append({"@id": uri})
+            graph.append(
+                {
+                    "@id": uri,
+                    "@type": ["CreativeWork", "Profile"],
+                    "name": label,
+                }
+            )
 
     # --- Actors, software, provenance context ---
     graph.extend(mapping.build_actors(model))
@@ -193,6 +219,20 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     graph.extend(context_entities)
     for ctx_entity in context_entities:
         root["mentions"].append({"@id": ctx_entity["@id"]})
+    # Copy provenance-context File artifacts (git-diff patch, dependency manifests) that rcr
+    # discovered/created into the crate so their relative @ids correspond to present files
+    # (RO-Crate 1.2 §4) and the crate re-loads via ro-crate-py.  The final H2 pass then links
+    # the now-present files from hasPart.
+    for ctx_entity in context_entities:
+        cid = ctx_entity.get("@id")
+        types = ctx_entity.get("@type")
+        type_list = types if isinstance(types, list) else [types]
+        if not isinstance(cid, str) or "File" not in {str(t) for t in type_list}:
+            continue
+        if cid.startswith(("#", "http://", "https://", "urn:", "file:")):
+            continue
+        if not (crate_dir / cid).exists():
+            _copy_into_crate(project_dir / cid, crate_dir / cid)
 
     # --- Parameters ---
     param_entities = mapping.build_parameters(model)
@@ -362,14 +402,47 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         if journal_src.exists():
             journal_rel = "events.ndjson"
             _copy_into_crate(journal_src, crate_dir / journal_rel)
-            graph.append({
+            journal_entity: dict[str, Any] = {
                 "@id": journal_rel,
                 "@type": "File",
                 "name": "Event journal",
                 "encodingFormat": "application/x-ndjson",
                 "about": {"@id": "./"},
-            })
+            }
+            # L8 (RO-Crate 1.2 SHOULD): File entities SHOULD carry contentSize (bytes).
+            try:
+                journal_entity["contentSize"] = str(journal_src.stat().st_size)
+            except OSError:
+                pass
+            graph.append(journal_entity)
             root["hasPart"].append({"@id": journal_rel})
+
+    # --- Human decisions (L6: materialize AskUserQuestion / plan approvals) ---
+    decision_entities = _build_tool_decisions(model)
+    graph.extend(decision_entities)
+    root["mentions"].extend({"@id": e["@id"]} for e in decision_entities)
+
+    # --- README.md (L3: WfRC SHOULD; harmless for process crates too) ---
+    readme_rel = "README.md"
+    _write_readme(crate_dir / readme_rel, model)
+    graph.append(
+        {
+            "@id": readme_rel,
+            "@type": "File",
+            "encodingFormat": "text/markdown",
+            "name": "Run README",
+            "about": {"@id": "./"},
+        }
+    )
+    root["hasPart"].append({"@id": readme_rel})
+
+    # --- H2 (RO-Crate 1.2 MUST): every File/Dataset data entity reachable from root hasPart.
+    # Data entities are linked, directly or indirectly, from the Root via hasPart.  After the
+    # whole graph is assembled, ensure every present-file data entity (sidecars, stdout/stderr
+    # logs, git-diff patch, dependency manifests, declared inputs/outputs) appears in hasPart —
+    # contextual (#-prefixed) entities, absolute-URI (web/by-reference) entities, and the
+    # metadata descriptor are excluded.
+    _ensure_data_entities_in_haspart(graph, root)
 
     # --- Write ---
     data = {
@@ -388,6 +461,105 @@ def _copy_into_crate(src: Path, dst: Path) -> None:
     if src.exists() and src.is_file():
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+
+
+def _ensure_data_entities_in_haspart(graph: list[dict[str, Any]], root: dict[str, Any]) -> None:
+    """H2 (RO-Crate 1.2 MUST): link every File/Dataset data entity to the root via hasPart.
+
+    A "data entity" is one whose @type includes File or Dataset and whose @id is a relative
+    path (not `#`-prefixed → contextual; not an absolute URI → web/by-reference, linked via
+    mentions) and not the metadata descriptor / crate root.  ro-crate-py's reader treats every
+    relative-@id File/Dataset as a data entity and raises on read unless it is linked from
+    hasPart, so this link is also what makes the emitted crate re-load via ro-crate-py (the H1
+    round-trip gate).  Existing hasPart entries and any `mentions` links are preserved."""
+    has_part = root.setdefault("hasPart", [])
+    present = {ref.get("@id") for ref in has_part if isinstance(ref, dict)}
+    for entity in graph:
+        entity_id = entity.get("@id")
+        if not isinstance(entity_id, str):
+            continue
+        if entity_id in present:
+            continue
+        if entity_id.startswith("#") or entity_id in {"./", "ro-crate-metadata.json"}:
+            continue
+        if entity_id.startswith(("http://", "https://", "urn:", "file:")):
+            continue
+        types = entity.get("@type")
+        type_list = types if isinstance(types, list) else [types]
+        if not any(str(t) in {"File", "Dataset"} for t in type_list):
+            continue
+        has_part.append({"@id": entity_id})
+        present.add(entity_id)
+
+
+def _write_readme(path: Path, model: RunModel) -> None:
+    """L3: write a short README.md at the crate root describing the run."""
+    title = model.title or "RO-Crate run"
+    lines = [
+        f"# {title}",
+        "",
+        (model.description or "Provenance crate generated by ro-crate-run.").strip(),
+        "",
+        f"- Profile: {model.selected_profile}",
+        f"- Created: {model.created_at}",
+        f"- Last updated: {model.updated_at}",
+        "",
+        "This RO-Crate captures the commands, inputs, outputs, and decisions of a "
+        "human-in-the-loop computational run.  See `ro-crate-metadata.json` for the full "
+        "machine-readable provenance graph.",
+        "",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
+    """L6: materialize captured human decisions (AskUserQuestion answers, approved plans).
+
+    Reads `getattr(model, "tool_decisions", [])` defensively so the builder works before and
+    after Agent C adds the field.  Each decision is attributed to the HUMAN (`#actor/human`)."""
+    decisions = getattr(model, "tool_decisions", []) or []
+    entities: list[dict[str, Any]] = []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        seq = decision.get("sequence")
+        if seq is None:
+            continue
+        timestamp = decision.get("timestamp")
+        tool = str(decision.get("tool") or "")
+        decision_id = f"#decision/{seq}"
+        if tool == "AskUserQuestion":
+            question = decision.get("question")
+            options = decision.get("options") or []
+            entity: dict[str, Any] = {
+                "@id": decision_id,
+                "@type": "ChooseAction",
+                "name": question or "User decision",
+                "agent": {"@id": "#actor/human"},
+                "object": question,
+                "result": decision.get("answer"),
+                "startTime": timestamp,
+                "endTime": timestamp,
+            }
+            if options:
+                entity["additionalProperty"] = [
+                    {"@type": "PropertyValue", "name": "option", "value": str(opt)}
+                    for opt in options
+                ]
+            entities.append(entity)
+        elif tool in {"ExitPlanMode", "EnterPlanMode"}:
+            entities.append(
+                {
+                    "@id": decision_id,
+                    "@type": ["CreativeWork"],
+                    "name": "Approved plan",
+                    "text": decision.get("plan"),
+                    "creator": {"@id": "#actor/human"},
+                    "dateCreated": timestamp,
+                }
+            )
+    return entities
 
 
 def _file_id(path: str, project_dir: Path) -> str:
@@ -489,48 +661,27 @@ def _write_metadata_with_rocrate(crate_dir: Path, data: dict[str, Any]) -> None:
     embedded_entities: dict[str, dict[str, Any]] = {}
     for entity in data["@graph"]:
         crate.add_or_update_jsonld(_rocrate_compatible(dict(entity), embedded_entities))
-    # ro-crate-py needs each nested typed entity (given a synthesized #embedded/* @id) to
-    # exist as a top-level entity so its inline @id reference resolves. These are reachable
-    # via their parent (e.g. #git/state), which is referenced from the root.
+    # H1: every nested typed dict that lacked an @id has been replaced by a reference
+    # ({"@id": "#embedded/<digest>"}) in its parent, and its FULL entity stored here as a
+    # top-level node.  ro-crate-py therefore serializes a reference (not an anonymous inline
+    # copy stripped of @id), so the emitted crate re-loads via rocrate.ROCrate() and contains
+    # no typed dict lacking an @id.  These nodes are reachable through their (referenced)
+    # parents, so no pruning is needed.
     for entity in embedded_entities.values():
-        crate.add_or_update_jsonld(entity)
+        crate.add_or_update_jsonld(dict(entity))
     with tempfile.TemporaryDirectory(prefix="rocrate-py-", dir=crate_dir.parent) as tmp:
         crate.write(tmp)
         shutil.copy2(Path(tmp) / "ro-crate-metadata.json", crate_dir / "ro-crate-metadata.json")
-    _prune_orphan_embedded(crate_dir / "ro-crate-metadata.json")
-
-
-def _prune_orphan_embedded(metadata_path: Path) -> None:
-    """Remove the top-level #embedded/* entities ro-crate-py promotes but then leaves
-    unreferenced (it serializes the nested PropertyValues inline without an @id). The inline
-    data is preserved; only the orphaned duplicate top-level entries are dropped."""
-    doc = json.loads(metadata_path.read_text())
-    graph = doc.get("@graph", [])
-    referenced: set[str] = set()
-
-    def _collect(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key == "@id" and isinstance(item, str):
-                    referenced.add(item)
-                else:
-                    _collect(item)
-        elif isinstance(value, list):
-            for item in value:
-                _collect(item)
-
-    for entity in graph:
-        _collect({k: v for k, v in entity.items() if k != "@id"})  # refs in property values
-    pruned = [
-        e for e in graph
-        if not (str(e.get("@id", "")).startswith("#embedded/") and e.get("@id") not in referenced)
-    ]
-    if len(pruned) != len(graph):
-        doc["@graph"] = pruned
-        metadata_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
 def _rocrate_compatible(value: Any, embedded_entities: dict[str, dict[str, Any]]) -> Any:
+    """Make a value safe for ro-crate-py, which rejects any nested typed dict lacking an @id.
+
+    When a nested dict carries `@type` but no `@id`/`@value`, synthesize a stable
+    content-addressed id `#embedded/<digest>`, store the FULL entity in `embedded_entities`
+    (so the caller can add it as a top-level node), and RETURN A REFERENCE `{"@id": ...}` in
+    the parent.  This keeps the @graph flattened/compacted (RO-Crate 1.2 MUST: no anonymous
+    inlining) and lets the crate re-load via ro-crate-py."""
     if isinstance(value, list):
         return [_rocrate_compatible(item, embedded_entities) for item in value]
     if isinstance(value, dict):
@@ -541,10 +692,10 @@ def _rocrate_compatible(value: Any, embedded_entities: dict[str, dict[str, Any]]
             digest = hashlib.sha256(
                 json.dumps(converted, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()[:16]
-            # ro-crate-py requires an @id on a nested typed dict (the crate will not write
-            # without it). This necessarily creates a top-level #embedded/* entity; it is
-            # reachable through its parent (e.g. #git/state) which the root now references.
-            converted["@id"] = f"#embedded/{digest}"
-            embedded_entities[str(converted["@id"])] = converted
+            embedded_id = f"#embedded/{digest}"
+            converted["@id"] = embedded_id
+            embedded_entities[embedded_id] = converted
+            # Return a REFERENCE to the now-top-level entity, not the inline dict.
+            return {"@id": embedded_id}
         return converted
     return value

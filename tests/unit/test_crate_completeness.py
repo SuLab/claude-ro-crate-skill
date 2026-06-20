@@ -14,7 +14,12 @@ import json
 from pathlib import Path
 
 from ro_crate_run.cli import main
-from tests.graph_helpers import assert_declared_io_reachable, assert_no_dangling_refs, reachable_ids
+from tests.graph_helpers import (
+    assert_declared_io_reachable,
+    assert_no_dangling_refs,
+    reachable_ids,
+    resolve_ref,
+)
 
 
 def _graph(tmp_path: Path) -> list:
@@ -26,10 +31,13 @@ def _by_id(graph: list) -> dict:
     return {e.get("@id"): e for e in graph}
 
 
-def _props(entity: dict) -> dict:
+def _props(entity: dict, graph: list) -> dict:
+    # Inline PropertyValues are node-ified into top-level #embedded/* entities (RO-Crate 1.2
+    # MUST: no anonymous inlining); dereference each before reading propertyID/value.
     ap = entity.get("additionalProperty")
     ap = ap if isinstance(ap, list) else ([ap] if ap else [])
-    return {p.get("propertyID"): p.get("value") for p in ap}
+    resolved = [resolve_ref(p, graph) for p in ap]
+    return {p.get("propertyID"): p.get("value") for p in resolved}
 
 
 def test_declared_input_is_reachable_and_carries_existence(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -47,7 +55,7 @@ def test_declared_input_is_reachable_and_carries_existence(tmp_path: Path, monke
 
     data = _by_id(graph)["data.csv"]
     assert "data.csv" in reachable_ids(graph), "declared input is an orphan"
-    assert _props(data).get("existence") == "observed local", "input existence not materialized"
+    assert _props(data, graph).get("existence") == "observed local", "input existence not materialized"
 
 
 def test_declared_output_flags_survive_command_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -64,9 +72,9 @@ def test_declared_output_flags_survive_command_output(tmp_path: Path, monkeypatc
     graph = _graph(tmp_path)
     rows = _by_id(graph)["rows.txt"]
     assert rows["description"] == "row dump", f"user --description clobbered: {rows['description']!r}"
-    assert _props(rows).get("existence") == "generated", "output existence not materialized"
+    assert _props(rows, graph).get("existence") == "generated", "output existence not materialized"
     future = _by_id(graph)["future.txt"]
-    assert _props(future).get("existence") == "expected"
+    assert _props(future, graph).get("existence") == "expected"
 
 
 def test_dependency_manifest_has_sha256_and_is_reachable(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -81,7 +89,7 @@ def test_dependency_manifest_has_sha256_and_is_reachable(tmp_path: Path, monkeyp
     assert_no_dangling_refs(graph)
     req = _by_id(graph).get("requirements.txt")
     assert req is not None, "dependency manifest not emitted"
-    digest = (req.get("identifier") or {}).get("value", "")
+    digest = (resolve_ref(req.get("identifier") or {}, graph) or {}).get("value", "")
     assert len(digest) == 64, f"dependency manifest missing sha256: {req}"
     assert "requirements.txt" in reachable_ids(graph), "dependency manifest is an orphan"
 

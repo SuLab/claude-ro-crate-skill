@@ -67,22 +67,31 @@
     "ComputationalWorkflow": 1,
     "ControlAction": 2,
     "CreateAction": 3,
-    "CreativeWork": 2,
+    "CreativeWork": 6,
     "Dataset": 1,
-    "File": 9,
+    "File": 10,
     "FormalParameter": 1,
     "HowTo": 1,
     "HowToStep": 2,
     "Person": 1,
-    "Profile": 1,
-    "PropertyValue": 2,
+    "Profile": 4,
+    "PropertyValue": 5,
     "SoftwareApplication": 7,
     "SoftwareSourceCode": 1
   },
   "root_conformsTo": [
-    "https://w3id.org/ro/wfrun/provenance/0.5"
+    "https://w3id.org/ro/wfrun/process/0.5",
+    "https://w3id.org/ro/wfrun/provenance/0.5",
+    "https://w3id.org/workflowhub/workflow-ro-crate/1.0"
   ],
   "root_hasPart": [
+    ".ro-crate-run/commands/cmd_000007.json",
+    ".ro-crate-run/commands/cmd_000011.json",
+    ".ro-crate-run/logs/cmd_000007.stderr.txt",
+    ".ro-crate-run/logs/cmd_000007.stdout.txt",
+    ".ro-crate-run/logs/cmd_000011.stderr.txt",
+    ".ro-crate-run/logs/cmd_000011.stdout.txt",
+    "README.md",
     "final.txt",
     "flow.cwl",
     "mid.txt"
@@ -96,6 +105,7 @@
     ".ro-crate-run/logs/cmd_000007.stdout.txt",
     ".ro-crate-run/logs/cmd_000011.stderr.txt",
     ".ro-crate-run/logs/cmd_000011.stdout.txt",
+    "README.md",
     "final.txt",
     "flow.cwl",
     "mid.txt"

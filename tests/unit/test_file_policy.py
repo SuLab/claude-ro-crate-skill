@@ -12,6 +12,7 @@ from ro_crate_run.config import default_config
 from ro_crate_run.materialize.builder import checkpoint
 from ro_crate_run.materialize.files import FilePlan, plan_file_inclusion
 from ro_crate_run.models import RunModel
+from tests.graph_helpers import resolve_ref
 
 # ---------------------------------------------------------------------------
 # Task 1: FilePlan + inclusion by include_declared_inputs/outputs
@@ -174,10 +175,13 @@ def test_checkpoint_copies_included_output_and_excludes_input_from_haspart(tmp_p
     haspart = {ref["@id"] for ref in root.get("hasPart", [])}
 
     assert "out.txt" in haspart  # output included by default
-    assert "in.csv" not in haspart  # input referenced, not included
-    assert any(e["@id"] == "in.csv" for e in graph["@graph"])  # but entity still present
-    assert (crate / "out.txt").exists()  # bytes copied into the crate
-    assert not (crate / "in.csv").exists()  # input bytes NOT copied
+    # H2 (RO-Crate 1.2 MUST + ro-crate-py round-trip): every relative-@id File data entity is
+    # linked from hasPart, so the by-reference input is linked too — but its bytes are still
+    # NOT copied into the crate (the by-reference / not-included file policy is unchanged).
+    assert "in.csv" in haspart
+    assert any(e["@id"] == "in.csv" for e in graph["@graph"])  # entity present
+    assert (crate / "out.txt").exists()  # included output bytes copied into the crate
+    assert not (crate / "in.csv").exists()  # by-reference input bytes NOT copied
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +234,11 @@ def test_large_output_entity_marked_not_hashed(tmp_path, monkeypatch):
     assert main(["run", "--outputs", "big.txt", "--", "python3", "-c", "open('big.txt','w').write('data')"]) == 0
     assert main(["checkpoint"]) == 0
 
-    graph = json.loads((tmp_path / ".ro-crate-run/ro-crate/ro-crate-metadata.json").read_text())
-    entity = next(e for e in graph["@graph"] if e["@id"] == "big.txt")
+    graph = json.loads((tmp_path / ".ro-crate-run/ro-crate/ro-crate-metadata.json").read_text())["@graph"]
+    entity = next(e for e in graph if e["@id"] == "big.txt")
     assert "identifier" not in entity
-    assert entity["additionalProperty"]["propertyID"] == "hash-status"
-    assert entity["additionalProperty"]["value"] == "not-hashed"
+    # The inline hash-status PropertyValue is node-ified into a top-level #embedded/* entity
+    # (RO-Crate 1.2 MUST: no anonymous inlining); the File carries a reference to it.
+    ap = resolve_ref(entity["additionalProperty"], graph)
+    assert ap["propertyID"] == "hash-status"
+    assert ap["value"] == "not-hashed"

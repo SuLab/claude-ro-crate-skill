@@ -107,10 +107,38 @@ def _check_workflow(ctx: ValidationContext, entities: dict[str, dict[str, Any]])
 
 def _check_provenance(ctx: ValidationContext, entities: dict[str, dict[str, Any]]) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
-    if not any("HowToStep" in _types(e) for e in entities.values()):
+    steps = [e for e in entities.values() if "HowToStep" in _types(e)]
+    if not steps:
         findings.append(ValidationFinding("profile", "provenance_missing_steps", "Provenance Run Crate requires HowToStep entities"))
     if not any("ControlAction" in _types(e) for e in entities.values()):
         findings.append(ValidationFinding("profile", "provenance_missing_control_action", "Provenance Run Crate requires ControlAction links"))
+    # Provenance 0.5 MUST (05-provenance-run-crate-05.md line 13): every HowToStep's
+    # `workExample` MUST reference the tool (or subworkflow) that implements the step.
+    for step in steps:
+        if not step.get("workExample"):
+            findings.append(
+                ValidationFinding(
+                    "profile",
+                    "step_missing_workexample",
+                    f"HowToStep {step.get('@id')} missing workExample (tool implementing the step)",
+                )
+            )
+    # Provenance 0.5 MUST (05-provenance-run-crate-05.md line 9): a ComputationalWorkflow
+    # that orchestrates steps MUST link the orchestrated tools via `hasPart`. Flag any
+    # provenance-profile workflow that declares `step` but omits a non-empty `hasPart`.
+    for workflow in entities.values():
+        if "ComputationalWorkflow" not in _types(workflow):
+            continue
+        if not workflow.get("step"):
+            continue
+        if not workflow.get("hasPart"):
+            findings.append(
+                ValidationFinding(
+                    "profile",
+                    "workflow_missing_haspart",
+                    f"ComputationalWorkflow {workflow.get('@id')} has steps but no hasPart linking orchestrated tools",
+                )
+            )
     return findings
 
 

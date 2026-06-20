@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ro_crate_run.cli import main
 from ro_crate_run.context import ProjectContext
+from tests.graph_helpers import resolve_ref
 
 # ---------------------------------------------------------------------------
 # Config-flag coverage: CLAUDE.md requires that *every* config.json flag changes
@@ -32,11 +33,15 @@ def _by_id(graph: list[dict]) -> dict[str, dict]:
     return {e["@id"]: e for e in graph if "@id" in e}
 
 
-def _props(entity: dict) -> list[dict]:
+def _props(entity: dict, graph: list[dict] | None = None) -> list[dict]:
     ap = entity.get("additionalProperty")
     if ap is None:
         return []
-    return ap if isinstance(ap, list) else [ap]
+    ap = ap if isinstance(ap, list) else [ap]
+    # Inline PropertyValues are node-ified into #embedded/* entities; dereference them.
+    if graph is not None:
+        ap = [resolve_ref(p, graph) for p in ap]
+    return ap
 
 
 def _validate_codes() -> tuple[set[str], set[str]]:
@@ -201,19 +206,23 @@ def test_max_file_size_mb_gates_hashing(tmp_path: Path, monkeypatch) -> None:
 
     # Default (100 MB): the small file is hashed → sha256 identifier present.
     assert main(["checkpoint"]) == 0
-    entity = _by_id(_graph())["big.bin"]
-    assert isinstance(entity.get("identifier"), dict)
-    assert entity["identifier"].get("propertyID") == "sha256"
+    graph = _graph()
+    entity = _by_id(graph)["big.bin"]
+    # The identifier PropertyValue is node-ified into a top-level #embedded/* entity.
+    ident = resolve_ref(entity.get("identifier"), graph)
+    assert isinstance(ident, dict)
+    assert ident.get("propertyID") == "sha256"
 
     # max_file_size_mb=0: the file now exceeds the limit → no hash, a
     # hash-status=not-hashed additionalProperty is recorded instead.
     _write_config(lambda c: c["hash_policy"].__setitem__("max_file_size_mb", 0))
     assert main(["checkpoint"]) == 0
-    entity = _by_id(_graph())["big.bin"]
+    graph = _graph()
+    entity = _by_id(graph)["big.bin"]
     assert "identifier" not in entity
     assert any(
         p.get("propertyID") == "hash-status" and p.get("value") == "not-hashed"
-        for p in _props(entity)
+        for p in _props(entity, graph)
     )
 
 
@@ -310,8 +319,9 @@ def test_hash_large_files_overrides_size_gate(tmp_path: Path, monkeypatch) -> No
     # ...but hash_large_files=True overrides the gate and hashes it anyway.
     _write_config(lambda c: c["hash_policy"].__setitem__("hash_large_files", True))
     assert main(["checkpoint"]) == 0
-    entity = _by_id(_graph())["big.bin"]
-    assert (entity.get("identifier") or {}).get("propertyID") == "sha256", \
+    graph = _graph()
+    entity = _by_id(graph)["big.bin"]
+    assert (resolve_ref(entity.get("identifier"), graph) or {}).get("propertyID") == "sha256", \
         f"hash_large_files did not override the size gate: {entity}"
 
 

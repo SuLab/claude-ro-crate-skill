@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ro_crate_run.cli import main
 from ro_crate_run.journal import EventWriter
-from tests.graph_helpers import assert_no_dangling_refs
+from tests.graph_helpers import assert_no_dangling_refs, resolve_ref
 
 
 def _types(entity: dict) -> list:
@@ -65,11 +65,14 @@ def test_accept_reject_and_phases_materialize(tmp_path: Path, monkeypatch) -> No
     assert any(str(e.get("@id", "")).startswith("#phase/") for e in graph), "phase not materialized"
 
 
-def _status_prop(entity: dict):  # type: ignore[no-untyped-def]
+def _status_prop(entity: dict, graph: list):  # type: ignore[no-untyped-def]
+    # The inline status PropertyValue is node-ified into a top-level #embedded/* entity
+    # (RO-Crate 1.2 MUST: no anonymous inlining); dereference before reading propertyID/value.
     ap = entity.get("additionalProperty")
     for p in (ap if isinstance(ap, list) else [ap]):
-        if isinstance(p, dict) and p.get("propertyID") == "status":
-            return p.get("value")
+        resolved = resolve_ref(p, graph)
+        if isinstance(resolved, dict) and resolved.get("propertyID") == "status":
+            return resolved.get("value")
     return None
 
 
@@ -87,8 +90,8 @@ def test_step_lifecycle_status_is_crate_visible(tmp_path: Path, monkeypatch) -> 
     graph = json.loads((tmp_path / ".ro-crate-run" / "ro-crate" / "ro-crate-metadata.json").read_text())["@graph"]
     assert_no_dangling_refs(graph)
     steps = {e.get("name"): e for e in graph if "HowToStep" in _types(e)}
-    assert _status_prop(steps["done_step"]) == "completed", "completed step not marked completed"
-    assert _status_prop(steps["open_step"]) == "started", "open step not marked started"
+    assert _status_prop(steps["done_step"], graph) == "completed", "completed step not marked completed"
+    assert _status_prop(steps["open_step"], graph) == "started", "open step not marked started"
     controls = [e for e in graph if "ControlAction" in _types(e)]
     assert controls and any(
         "Completed" in str((c.get("actionStatus") or {}).get("@id", "")) for c in controls

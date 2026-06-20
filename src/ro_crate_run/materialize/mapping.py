@@ -59,15 +59,33 @@ def build_actors(model: RunModel) -> list[dict[str, Any]]:
         )
     if model.workflow and model.workflow.get("engine") and model.workflow["engine"] != "unknown":
         engine = str(model.workflow["engine"])
+        # Base workflows.html MUST: a language/engine SoftwareApplication entity carries
+        # name + url + version. Supply the engine homepage from a local map and the observed
+        # engine version when the model carries one, else the placeholder "unknown".
         actors.append(
             {
                 "@id": f"#actor/engine/{engine}",
                 "@type": "SoftwareApplication",
                 "name": engine,
+                "url": _ENGINE_HOMEPAGE.get(engine.lower()),
+                "softwareVersion": str(
+                    model.workflow.get("version") or model.workflow.get("engine_version") or "unknown"
+                ),
             }
         )
     # Strip None-valued fields before returning.
     return [{k: v for k, v in actor.items() if v is not None} for actor in actors]
+
+
+# Engine homepage map (M5). Used to populate the engine SoftwareApplication `url`.
+_ENGINE_HOMEPAGE: dict[str, str] = {
+    "cwl": "https://www.commonwl.org/",
+    "cwltool": "https://www.commonwl.org/",
+    "snakemake": "https://snakemake.github.io/",
+    "nextflow": "https://www.nextflow.io/",
+    "galaxy": "https://galaxyproject.org/",
+    "wdl": "https://openwdl.org/",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +134,37 @@ def build_software(model: RunModel) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _content_size(rel: str, project_dir: os.PathLike[str] | str) -> str | None:
+    """Return the on-disk byte size (as a str) of a project-relative path, or None.
+
+    Used to populate `contentSize` (base RO-Crate 1.2 SHOULD) on auxiliary File entities
+    (command sidecars/logs, git-diff patch, dependency manifests). Absolute paths are
+    resolved as-is; relative paths are resolved against the project dir.
+    """
+    if not rel:
+        return None
+    p = Path(rel)
+    candidate = p if p.is_absolute() else Path(project_dir) / p
+    try:
+        if candidate.is_file():
+            return str(candidate.stat().st_size)
+    except OSError:
+        return None
+    return None
+
+
 def build_command_action(
-    cmd: CommandRecord, idmap: IdMap, project_dir: os.PathLike[str] | str
+    cmd: CommandRecord,
+    idmap: IdMap,
+    project_dir: os.PathLike[str] | str,
+    env_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return [action_entity, *log_sidecar_file_entities] for one command."""
+    """Return [action_entity, *log_sidecar_file_entities] for one command.
+
+    ``env_ids`` (optional) are the ``#env/*`` PropertyValue ids emitted by
+    ``build_environment``; when present they are referenced from the action via
+    ``environment`` (Process 0.5 conditional SHOULD).
+    """
     action_type = command_action_type(cmd)
     completed = cmd.terminal_status == "completed"
     status = (
@@ -156,6 +201,10 @@ def build_command_action(
     }
     if not completed:
         action["error"] = f"Command exited with code {cmd.exit_code}; see stderr log."
+    if env_ids:
+        # L5: Process 0.5 conditional SHOULD — env vars affecting the run SHOULD be on the
+        # action via `environment` → PropertyValue. Refs only; entities come from build_environment.
+        action["environment"] = [{"@id": eid} for eid in env_ids]
     entities: list[dict[str, Any]] = [action]
     for rel, label in [
         (cmd.sidecar, "invocation record"),
@@ -163,15 +212,18 @@ def build_command_action(
         (cmd.stderr_log, "stderr"),
     ]:
         if rel:
-            entities.append(
-                {
-                    "@id": rel,
-                    "@type": "File",
-                    "name": f"{cmd.command_id} {label}",
-                    "encodingFormat": "application/json" if rel.endswith(".json") else "text/plain",
-                    "about": {"@id": cmd.action_id},
-                }
-            )
+            sidecar_entity: dict[str, Any] = {
+                "@id": rel,
+                "@type": "File",
+                "name": f"{cmd.command_id} {label}",
+                "encodingFormat": "application/json" if rel.endswith(".json") else "text/plain",
+                "about": {"@id": cmd.action_id},
+            }
+            # L8-aux: base 1.2 SHOULD — contentSize on the sidecar/log File entity.
+            size = _content_size(rel, project_dir)
+            if size is not None:
+                sidecar_entity["contentSize"] = size
+            entities.append(sidecar_entity)
     return entities
 
 
@@ -278,12 +330,16 @@ def build_raw_command_actions(model: RunModel) -> list[dict[str, Any]]:
             "actionStatus": {"@id": "http://schema.org/CompletedActionStatus"},
             "agent": {"@id": "#actor/claude-code"},
             "instrument": {"@id": tool_id},
+            # L4: Process 0.5 — object MAY. rcr cannot infer the outputs of an unwrapped bash
+            # command (so result is intentionally absent), but the command operates on the
+            # crate's root dataset, so reference it via `object` to improve the SHOULD-quality.
+            "object": [{"@id": "./"}],
         })
     return entities
 
 
 def build_subagent_actions(model: RunModel) -> list[dict[str, Any]]:
-    """Emit an OrganizeAction for each subagent/Task the agent dispatched."""
+    """Emit an Action for each subagent/Task the agent dispatched."""
     by_task: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for s in model.subagents:
@@ -301,7 +357,10 @@ def build_subagent_actions(model: RunModel) -> list[dict[str, Any]]:
         s = by_task[tid]
         entities.append({
             "@id": f"#subagent/{s.get('sequence')}",
-            "@type": "OrganizeAction",
+            # M6: OrganizeAction is reserved (Provenance 0.5) for the engine-orchestration
+            # hierarchy (instrument=engine, object=ControlActions, result=workflow CreateAction).
+            # A subagent dispatch has none of those, so it is a generic Action.
+            "@type": "Action",
             "name": f"Dispatch subagent {s.get('subagent_type') or tid}",
             "description": str(s.get("description") or "Subagent task dispatched by the agent."),
             "startTime": s.get("timestamp"),
@@ -421,7 +480,7 @@ def build_results(model: RunModel) -> list[dict[str, Any]]:
 
 
 def build_phase_actions(model: RunModel) -> list[dict[str, Any]]:
-    """Emit an OrganizeAction grouping for each declared phase of the agent's work."""
+    """Emit an Action grouping for each declared phase of the agent's work."""
     entities: list[dict[str, Any]] = []
     for idx, (name, phase) in enumerate(model.phases.items(), start=1):
         status = phase.get("status", "")
@@ -432,7 +491,9 @@ def build_phase_actions(model: RunModel) -> list[dict[str, Any]]:
         )
         entities.append({
             "@id": f"#phase/{idx}",
-            "@type": "OrganizeAction",
+            # M6: OrganizeAction is reserved (Provenance 0.5) for engine orchestration; a
+            # human work-phase grouping is a generic Action.
+            "@type": "Action",
             "name": f"Phase: {name}",
             "description": f"Project phase {name!r} ({status or 'started'}).",
             "startTime": phase.get("timestamp"),
@@ -539,6 +600,20 @@ def build_file_entity(
 # ---------------------------------------------------------------------------
 
 
+# L2: Bioschemas FormalParameter profile. WfRC 0.5 SHOULD — each FormalParameter
+# SHOULD carry conformsTo → this profile permalink.
+_FORMAL_PARAMETER_PROFILE = "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"
+
+
+def _formal_parameter_profile_entity() -> dict[str, Any]:
+    """The contextual Profile entity the FormalParameter conformsTo refs point at."""
+    return {
+        "@id": _FORMAL_PARAMETER_PROFILE,
+        "@type": ["CreativeWork", "Profile"],
+        "name": "Bioschemas FormalParameter profile 1.0-RELEASE",
+    }
+
+
 def build_parameters(model: RunModel) -> list[dict[str, Any]]:
     """Emit FormalParameter + PropertyValue pairs for each declared run parameter."""
     entities: list[dict[str, Any]] = []
@@ -553,6 +628,8 @@ def build_parameters(model: RunModel) -> list[dict[str, Any]]:
                 "name": name,
                 "additionalType": parameter.get("type", "Text"),
                 "valueRequired": True,
+                # L2: WfRC 0.5 SHOULD — conformsTo the Bioschemas FormalParameter profile.
+                "conformsTo": {"@id": _FORMAL_PARAMETER_PROFILE},
             }
         )
         entities.append(
@@ -565,6 +642,9 @@ def build_parameters(model: RunModel) -> list[dict[str, Any]]:
                 "exampleOfWork": {"@id": formal_id},
             }
         )
+    if model.parameters:
+        # Emit the referenced Profile contextual entity once so the conformsTo ref resolves.
+        entities.append(_formal_parameter_profile_entity())
     return entities
 
 
@@ -593,8 +673,12 @@ def workflow_formal_parameters(
                     "name": item.get("role") or os.path.basename(path),
                     "additionalType": "File",
                     "valueRequired": bool(item.get("required", False)),
+                    # L2: WfRC 0.5 SHOULD — conformsTo the Bioschemas FormalParameter profile.
+                    "conformsTo": {"@id": _FORMAL_PARAMETER_PROFILE},
                 }
             )
+    if params:
+        params.append(_formal_parameter_profile_entity())
     return params, path_map
 
 
@@ -655,7 +739,41 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
         entity["step"] = [
             {"@id": idmap.entity_for_step(step_id)} for step_id in sorted(model.steps)
         ]
+    # H4: Provenance 0.5 MUST — the ComputationalWorkflow's hasPart references the @ids of
+    # the orchestrated tools (the SoftwareApplications the steps invoke + the engine). Every
+    # ref MUST resolve, so we only list ids that build_software / build_actors actually emit.
+    tool_ids = _orchestrated_tool_ids(model)
+    if tool_ids:
+        entity["hasPart"] = [{"@id": tid} for tid in tool_ids]
     return [entity]
+
+
+def _orchestrated_tool_ids(model: RunModel) -> list[str]:
+    """Return the ordered, de-duplicated @ids of tools orchestrated by the workflow (H4).
+
+    Sources, all of which are guaranteed emitted elsewhere so the refs resolve:
+    - the per-command tool `#software/<basename>` ids (emitted by build_software via commands),
+    - the declared-software `#software/<slug>` ids (emitted by build_software),
+    - the workflow engine `#actor/engine/<engine>` (emitted by build_actors when known).
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            ids.append(value)
+
+    for cmd in model.commands:
+        if cmd.argv:
+            _add(software_entity_id(os.path.basename(cmd.argv[0])))
+    for sw in model.software:
+        name = str(sw.get("name") or sw.get("command") or "software")
+        _add(software_entity_id(name))
+    engine = (model.workflow or {}).get("engine")
+    if engine and engine != "unknown":
+        _add(f"#actor/engine/{engine}")
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +899,21 @@ _STEP_STATUS_URI = {
 }
 
 
+def _step_fallback_workexample(model: RunModel) -> str | None:
+    """Return the @id used as a command-less step's `workExample` (H3).
+
+    Prefer the workflow engine SoftwareApplication (`#actor/engine/<engine>`, emitted by
+    build_actors when the engine is known); otherwise fall back to the workflow entity
+    itself (`model.workflow["path"]`, always present when steps exist). Both refs resolve.
+    """
+    wf = model.workflow or {}
+    engine = wf.get("engine")
+    if engine and engine != "unknown":
+        return f"#actor/engine/{engine}"
+    path = wf.get("path")
+    return str(path) if path else None
+
+
 def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
     """Emit a HowToStep for every step id, plus a ControlAction for steps with
     a mapped command.  Guarantees no dangling step refs from build_workflow.
@@ -796,6 +929,9 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
     for cmd in model.commands:
         if cmd.step_id:
             cmd_by_step.setdefault(cmd.step_id, cmd)
+    # H3: workExample MUST be set on EVERY HowToStep (Provenance 0.5 MUST). A command-less
+    # step (e.g. Snakemake `all`) falls back to the engine SoftwareApplication / the workflow.
+    fallback_workexample = _step_fallback_workexample(model)
     entities: list[dict[str, Any]] = []
     for step_id in sorted(model.steps):
         step_entity_id = idmap.entity_for_step(step_id)
@@ -813,6 +949,8 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
         step_cmd: CommandRecord | None = cmd_by_step.get(step_id)
         if step_cmd and step_cmd.argv:
             howto["workExample"] = {"@id": software_entity_id(os.path.basename(step_cmd.argv[0]))}
+        elif fallback_workexample is not None:
+            howto["workExample"] = {"@id": fallback_workexample}
         entities.append(howto)
         if step_cmd:
             entities.append(
@@ -836,8 +974,14 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def build_git(model: RunModel) -> list[dict[str, Any]]:
-    """Emit a #git/state Thing entity (plus optional diff File entity)."""
+def build_git(
+    model: RunModel, project_dir: os.PathLike[str] | str | None = None
+) -> list[dict[str, Any]]:
+    """Emit a #git/state Thing entity (plus optional diff File entity).
+
+    ``project_dir`` (optional) is used only to compute ``contentSize`` on the git-diff
+    File entity (L8-aux, base 1.2 SHOULD).
+    """
     git = model.git or {}
     if not git.get("available"):
         return []
@@ -862,15 +1006,18 @@ def build_git(model: RunModel) -> list[dict[str, Any]]:
     }
     entities: list[dict[str, Any]] = [{k: v for k, v in entity.items() if v is not None}]
     if git.get("diff_file"):
-        entities.append(
-            {
-                "@id": str(git["diff_file"]),
-                "@type": "File",
-                "name": "git diff",
-                "encodingFormat": "text/x-patch",
-                "about": {"@id": "#git/state"},
-            }
-        )
+        diff_entity: dict[str, Any] = {
+            "@id": str(git["diff_file"]),
+            "@type": "File",
+            "name": "git diff",
+            "encodingFormat": "text/x-patch",
+            "about": {"@id": "#git/state"},
+        }
+        if project_dir is not None:
+            size = _content_size(str(git["diff_file"]), project_dir)
+            if size is not None:
+                diff_entity["contentSize"] = size
+        entities.append(diff_entity)
     return entities
 
 
@@ -890,6 +1037,23 @@ def build_environment(model: RunModel) -> list[dict[str, Any]]:
     ]
 
 
+_DOCKER_IMAGE_TYPE = "https://w3id.org/ro/terms/workflow-run#DockerImage"
+_SIF_IMAGE_TYPE = "https://w3id.org/ro/terms/workflow-run#SIFImage"
+
+
+def _container_additional_type(registry: str, image: str, tag: str) -> str:
+    """Derive the ContainerImage additionalType URI from the registry/ref (M7).
+
+    SIF / Singularity / Apptainer references → SIFImage; everything else (OCI/Docker
+    registries: docker.io, ghcr.io, quay.io, registry.*, or an unqualified default) → DockerImage.
+    The terms are vendored in assets/contexts/workflow-run.jsonld.
+    """
+    blob = " ".join((registry, image, tag)).lower()
+    if image.lower().endswith(".sif") or "singularity" in blob or "apptainer" in blob:
+        return _SIF_IMAGE_TYPE
+    return _DOCKER_IMAGE_TYPE
+
+
 def build_containers(model: RunModel) -> list[dict[str, Any]]:
     """Emit a ContainerImage entity per observed container."""
     entities: list[dict[str, Any]] = []
@@ -898,6 +1062,15 @@ def build_containers(model: RunModel) -> list[dict[str, Any]]:
         entity = {
             "@id": f"#container/{idx}",
             "@type": "ContainerImage",
+            # M7: Process/Workflow 0.5 SHOULD — ContainerImage SHOULD list additionalType
+            # (a workflow-run namespace URI) alongside registry + name.
+            "additionalType": {
+                "@id": _container_additional_type(
+                    str(container.get("registry", "")),
+                    str(container.get("image", "")),
+                    str(container.get("tag", "")),
+                )
+            },
             "registry": container.get("registry"),
             "name": container.get("image"),
             "tag": container.get("tag"),
@@ -907,11 +1080,14 @@ def build_containers(model: RunModel) -> list[dict[str, Any]]:
     return entities
 
 
-def build_dependencies(model: RunModel) -> list[dict[str, Any]]:
+def build_dependencies(
+    model: RunModel, project_dir: os.PathLike[str] | str | None = None
+) -> list[dict[str, Any]]:
     """Emit a File entity per observed dependency lockfile / manifest.
 
     Carries the recorded sha256 so the manifest is verifiable (the digest is captured at
     scan time but was previously dropped), and gives it a sensible description.
+    ``project_dir`` (optional) is used only to populate ``contentSize`` (L8-aux, base 1.2 SHOULD).
     """
     entities: list[dict[str, Any]] = []
     for dep in model.dependencies:
@@ -930,6 +1106,10 @@ def build_dependencies(model: RunModel) -> list[dict[str, Any]]:
                 "propertyID": "sha256",
                 "value": digest,
             }
+        if project_dir is not None:
+            size = _content_size(str(dep["path"]), project_dir)
+            if size is not None:
+                entity["contentSize"] = size
         entities.append(entity)
     return entities
 

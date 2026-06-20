@@ -105,7 +105,10 @@ def test_rcr_wrapped_bash_excluded_from_raw_commands(tmp_path: Path, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Subagent -> #subagent/{seq} OrganizeAction
+# Subagent -> #subagent/{seq} Action
+# (Provenance Run Crate 0.5 reserves OrganizeAction for the workflow-engine
+# orchestration run — instrument->engine, object->ControlActions,
+# result->workflow CreateAction — so a subagent dispatch is a generic Action.)
 # ---------------------------------------------------------------------------
 
 
@@ -129,7 +132,8 @@ def test_subagent_task_materializes_organize_action(tmp_path: Path, monkeypatch)
     subagents = _by_prefix(graph, "#subagent/")
     assert subagents, "subagent task not materialized as #subagent/*"
     action = subagents[0]
-    assert "OrganizeAction" in _types(action), f"expected OrganizeAction; types={_types(action)}"
+    assert "Action" in _types(action), f"expected Action; types={_types(action)}"
+    assert "OrganizeAction" not in _types(action), "OrganizeAction is reserved for engine orchestration"
     _assert_action_shape(action)
     assert action.get("agent", {}).get("@id") == "#actor/claude-code"
 

@@ -9,7 +9,7 @@ from ro_crate_run.cli import main
 from ro_crate_run.materialize.run_model import build_run_model
 from ro_crate_run.models import ValidationReport
 from ro_crate_run.state import load_state
-from tests.graph_helpers import assert_no_dangling_refs
+from tests.graph_helpers import assert_no_dangling_refs, resolve_ref
 
 
 def test_run_model_collects_declarations_and_commands(tmp_path: Path, monkeypatch) -> None:
@@ -55,12 +55,14 @@ def test_aborted_run_surfaces_run_status_on_crate_root(tmp_path: Path, monkeypat
     # consumer can tell the run ended early.
     assert main(["abort", "ran out of time"]) == 0
     assert main(["checkpoint"]) == 0
-    root = {e["@id"]: e for e in json.loads(metadata_path.read_text())["@graph"]}["./"]
-    assert root["additionalProperty"] == {
-        "@type": "PropertyValue",
-        "propertyID": "run-status",
-        "value": "aborted",
-    }
+    graph = json.loads(metadata_path.read_text())["@graph"]
+    root = {e["@id"]: e for e in graph}["./"]
+    # The inline run-status PropertyValue is node-ified into a top-level #embedded/* entity
+    # (RO-Crate 1.2 MUST: no anonymous inlining); the root carries a reference to it.
+    resolved = resolve_ref(root["additionalProperty"], graph)
+    assert resolved["@type"] == "PropertyValue"
+    assert resolved["propertyID"] == "run-status"
+    assert resolved["value"] == "aborted"
 
 
 def test_checkpoint_writes_ro_crate_12_process_metadata(tmp_path: Path, monkeypatch) -> None:
@@ -200,10 +202,14 @@ def test_process_crate_has_actors_and_no_dangling_refs(tmp_path: Path, monkeypat
     ids = {e["@id"] for e in graph}
     assert "#actor/human" in ids and "#actor/rcr" in ids and "#actor/python" in ids
     # The command action's instrument now resolves to an emitted software entity.
+    def _type_set(e: dict) -> set:
+        t = e.get("@type")
+        return set(t) if isinstance(t, list) else {t}
+
     actions = [
         e
         for e in graph
-        if e.get("@type") in {"CreateAction", "Action", "UpdateAction", "DeleteAction"}
+        if _type_set(e) & {"CreateAction", "Action", "UpdateAction", "DeleteAction"}
     ]
     assert actions and actions[0]["instrument"]["@id"] in ids
     assert_no_dangling_refs(graph)

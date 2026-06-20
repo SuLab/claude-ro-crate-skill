@@ -247,7 +247,11 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
         elif event.event_type == "tool.completed":
             tool_name = str(payload.get("tool_name", ""))
             command = _bash_command(payload)
-            if tool_name == "Bash" and command and not _is_rcr_invocation(command):
+            if tool_name in {"AskUserQuestion", "ExitPlanMode", "EnterPlanMode"}:
+                decision = _tool_decision(tool_name, payload, event.timestamp, event.sequence)
+                if decision is not None:
+                    model.tool_decisions.append(decision)
+            elif tool_name == "Bash" and command and not _is_rcr_invocation(command):
                 # Substantive raw shell NOT wrapped in rcr run (rcr-wrapped commands are
                 # already captured as execution.command.* -> CommandRecord; rcr/hook
                 # provenance tooling is excluded so it never pollutes the workflow).
@@ -292,6 +296,90 @@ def _bash_command(payload: dict[str, Any]) -> str:
     if isinstance(tool_input, dict):
         return str(tool_input.get("command", ""))
     return ""
+
+
+def _tool_decision(
+    tool_name: str, payload: dict[str, Any], timestamp: str, sequence: int
+) -> dict[str, Any] | None:
+    """Project a human decision-point tool.completed event into a tool_decisions dict.
+
+    Shapes confirmed by injecting real PostToolUse events through the hook path:
+      - AskUserQuestion: tool_input.questions[] (each {header, question, multiSelect,
+        options[]{label, description}}); tool_response.answers[] (each {header, question,
+        selected[]}). A single call may carry multiple questions.
+      - Exit/EnterPlanMode: tool_input.plan is the plan text.
+    Robust to missing keys (everything via .get); returns None if there is no usable content.
+    """
+    base: dict[str, Any] = {
+        "sequence": sequence,
+        "timestamp": timestamp,
+        "tool": tool_name,
+        "question": None,
+        "options": [],
+        "answer": None,
+        "plan": None,
+    }
+    if tool_name == "AskUserQuestion":
+        question, options, answer = _extract_ask(payload)
+        if question is None and not options and answer is None:
+            return None
+        base["question"] = question
+        base["options"] = options
+        base["answer"] = answer
+        return base
+    # ExitPlanMode / EnterPlanMode
+    tool_input = payload.get("tool_input")
+    plan = None
+    if isinstance(tool_input, dict):
+        raw_plan = tool_input.get("plan")
+        if raw_plan is not None:
+            plan = str(raw_plan)
+    if not plan:
+        return None
+    base["plan"] = plan
+    return base
+
+
+def _extract_ask(
+    payload: dict[str, Any],
+) -> tuple[str | None, list[str], str | None]:
+    """Flatten AskUserQuestion question(s), option labels, and selected answer(s)."""
+    tool_input = payload.get("tool_input")
+    questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+    question_texts: list[str] = []
+    options: list[str] = []
+    if isinstance(questions, list):
+        for q in questions:
+            if not isinstance(q, dict):
+                continue
+            qtext = q.get("question") or q.get("header")
+            if qtext:
+                question_texts.append(str(qtext))
+            opts = q.get("options")
+            if isinstance(opts, list):
+                for opt in opts:
+                    if isinstance(opt, dict):
+                        label = opt.get("label")
+                        if label is not None:
+                            options.append(str(label))
+                    elif opt is not None:
+                        options.append(str(opt))
+    answers: list[str] = []
+    tool_response = payload.get("tool_response")
+    raw_answers = tool_response.get("answers") if isinstance(tool_response, dict) else None
+    if isinstance(raw_answers, list):
+        for ans in raw_answers:
+            if isinstance(ans, dict):
+                selected = ans.get("selected")
+                if isinstance(selected, list):
+                    answers.extend(str(s) for s in selected if s is not None)
+                elif selected is not None:
+                    answers.append(str(selected))
+            elif ans is not None:
+                answers.append(str(ans))
+    question = "; ".join(question_texts) if question_texts else None
+    answer = "; ".join(answers) if answers else None
+    return question, options, answer
 
 
 def _is_rcr_invocation(command: str) -> bool:

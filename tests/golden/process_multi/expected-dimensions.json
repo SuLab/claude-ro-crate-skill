@@ -31,18 +31,27 @@
   },
   "entity_types": {
     "CreateAction": 2,
-    "CreativeWork": 2,
+    "CreativeWork": 3,
     "Dataset": 1,
-    "File": 9,
+    "File": 10,
     "Person": 1,
     "Profile": 1,
+    "PropertyValue": 5,
     "SoftwareApplication": 5
   },
   "root_conformsTo": [
     "https://w3id.org/ro/wfrun/process/0.5"
   ],
   "root_hasPart": [
+    ".ro-crate-run/commands/cmd_000005.json",
+    ".ro-crate-run/commands/cmd_000007.json",
+    ".ro-crate-run/logs/cmd_000005.stderr.txt",
+    ".ro-crate-run/logs/cmd_000005.stdout.txt",
+    ".ro-crate-run/logs/cmd_000007.stderr.txt",
+    ".ro-crate-run/logs/cmd_000007.stdout.txt",
+    "README.md",
     "final.txt",
+    "in.txt",
     "step1.txt"
   ],
   "root_mainEntity": null,
@@ -54,6 +63,7 @@
     ".ro-crate-run/logs/cmd_000005.stdout.txt",
     ".ro-crate-run/logs/cmd_000007.stderr.txt",
     ".ro-crate-run/logs/cmd_000007.stdout.txt",
+    "README.md",
     "final.txt",
     "in.txt",
     "step1.txt"

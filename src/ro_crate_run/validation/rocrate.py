@@ -13,7 +13,18 @@ _ROOT_REQUIRED_ALWAYS = ("name", "description", "license")
 _ROOT_REQUIRED_CONDITIONAL = ("datePublished",)
 
 
-def _recorded_sha256(entity: dict[str, Any]) -> str | None:
+def _deref(candidate: Any, entities: dict[Any, dict[str, Any]]) -> Any:
+    """Resolve a PropertyValue that is a ``{"@id": ...}`` reference to its promoted
+    top-level node. The materializer node-ifies nested typed dicts (RO-Crate 1.2 MUST:
+    no anonymous inlining), so an ``identifier``/``additionalProperty`` value is a bare
+    reference rather than an inline dict; resolve it before reading propertyID/value.
+    Inline dicts (legacy) pass through unchanged."""
+    if isinstance(candidate, dict) and set(candidate.keys()) == {"@id"}:
+        return entities.get(candidate["@id"], candidate)
+    return candidate
+
+
+def _recorded_sha256(entity: dict[str, Any], entities: dict[Any, dict[str, Any]]) -> str | None:
     """Return the bare sha256 hex recorded on a File entity, if any.
 
     The hash is carried as an ``identifier`` PropertyValue (propertyID ``sha256``);
@@ -22,6 +33,7 @@ def _recorded_sha256(entity: dict[str, Any]) -> str | None:
     identifier = entity.get("identifier")
     candidates = identifier if isinstance(identifier, list) else [identifier]
     for candidate in candidates:
+        candidate = _deref(candidate, entities)
         if isinstance(candidate, dict) and candidate.get("propertyID") == "sha256":
             value = candidate.get("value")
             if isinstance(value, str) and value:
@@ -59,14 +71,90 @@ def _deleted_file_ids(graph: list[dict[str, Any]]) -> set[str]:
     return ids
 
 
-def _entity_existence(entity: dict[str, Any]) -> str | None:
+def _entity_existence(entity: dict[str, Any], entities: dict[Any, dict[str, Any]]) -> str | None:
     """The existence class materialized on a File/Dataset entity (its `existence`
     additionalProperty PropertyValue), or None."""
     ap = entity.get("additionalProperty")
     for prop in (ap if isinstance(ap, list) else [ap]):
+        prop = _deref(prop, entities)
         if isinstance(prop, dict) and prop.get("propertyID") == "existence":
             return str(prop.get("value"))
     return None
+
+
+def _find_anonymous_nodes(value: Any) -> list[dict[str, Any]]:
+    """Recursively collect dicts that carry an ``@type`` but neither an ``@id``
+    nor an ``@value`` — anonymous (un-identified) entities.
+
+    RO-Crate 1.2 base MUST (01-rocrate12-base.md lines 49-50): nested entities MUST
+    be separate contextual entities in the flat @graph (no anonymous inlining) and
+    every entity MUST have an ``@id``. A dict with ``@type`` but no ``@id``/``@value``
+    is an entity reference that was inlined without an identifier — a MUST violation.
+    A dict carrying ``@value`` is a typed JSON-LD literal (not an entity), so it is
+    exempt. Dicts that are pure references (``{"@id": ...}`` with no ``@type``) are
+    also fine.
+    """
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if "@type" in value and "@id" not in value and "@value" not in value:
+            found.append(value)
+        for v in value.values():
+            found.extend(_find_anonymous_nodes(v))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_find_anonymous_nodes(item))
+    return found
+
+
+def _haspart_reachable(graph: list[dict[str, Any]]) -> set[str]:
+    """The set of @ids reachable from the Root Data Entity ``./`` by following
+    ``hasPart`` edges only (a hasPart-only walk).
+
+    RO-Crate 1.2 base MUST (01-rocrate12-base.md line 33): data entities MUST be
+    linked, directly or indirectly, from the Root Data Entity using the ``hasPart``
+    property. Reachability via ``mentions``/``object``/``result`` etc. does NOT
+    satisfy this MUST.
+    """
+    by_id = {str(e.get("@id")): e for e in graph if isinstance(e, dict) and e.get("@id")}
+    reachable: set[str] = set()
+    frontier = ["./"]
+    while frontier:
+        current = frontier.pop()
+        entity = by_id.get(current)
+        if entity is None:
+            continue
+        parts = entity.get("hasPart", [])
+        if isinstance(parts, dict):
+            parts = [parts]
+        elif not isinstance(parts, list):
+            parts = []
+        for ref in parts:
+            ref_id = ref.get("@id") if isinstance(ref, dict) else ref
+            if not isinstance(ref_id, str) or ref_id in reachable:
+                continue
+            reachable.add(ref_id)
+            frontier.append(ref_id)
+    return reachable
+
+
+def _is_local_data_entity(entity: dict[str, Any]) -> bool:
+    """True for a File/Dataset data entity whose @id is a relative, non-``#`` path
+    (i.e. a packaged local data entity that MUST be reachable via hasPart).
+
+    Web-based (absolute URI) data entities, contextual ``#``-prefixed entities, the
+    metadata descriptor, and the root itself are excluded — the hasPart MUST applies
+    to packaged relative-path data entities.
+    """
+    types = entity.get("@type", [])
+    types = types if isinstance(types, list) else [types]
+    if "File" not in types and "Dataset" not in types:
+        return False
+    eid = str(entity.get("@id", ""))
+    if eid in ("", "./", "ro-crate-metadata.json"):
+        return False
+    if eid.startswith(("http://", "https://", "urn:", "file:", "#")):
+        return False
+    return True
 
 
 def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
@@ -147,7 +235,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         if resolved is None:
             # Also trust the existence materialized on the entity itself (e.g. imported files
             # carry a declared-only existence but are not in state.declared_*), not only state.
-            if eid not in exempt_ids and _entity_existence(entity) not in _ABSENT_EXISTENCE:
+            if eid not in exempt_ids and _entity_existence(entity, entities) not in _ABSENT_EXISTENCE:
                 findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
             continue
         # Content integrity: a crate's recorded sha256 must match the bytes on disk.
@@ -158,7 +246,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         # file would otherwise be masked. Files exempt from presence checks (DeleteAction
         # targets, remote/expected/missing/declared-only) are also exempt from content checks.
         if "File" in types and eid not in exempt_ids:
-            recorded = _recorded_sha256(entity)
+            recorded = _recorded_sha256(entity, entities)
             if recorded is not None:
                 disk_paths = [crate_path, project_path] if crate_path != project_path else [crate_path]
                 for disk_path in disk_paths:
@@ -172,4 +260,42 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
                             )
                         )
                         break
+
+    graph = metadata.get("@graph", [])
+
+    # L2 anonymous-entity check — base MUST: every entity has an @id; nested typed
+    # nodes must be promoted to flat @graph entities, never inlined anonymously.
+    # We scan the whole document (including values nested inside property objects),
+    # so an anonymous PropertyValue buried inside an action's additionalProperty is
+    # still caught. Skip the metadata @context blob if present.
+    for entity in graph:
+        if not isinstance(entity, dict):
+            continue
+        for node in _find_anonymous_nodes(entity):
+            type_hint = node.get("@type")
+            findings.append(
+                ValidationFinding(
+                    "ro_crate",
+                    "anonymous_entity",
+                    f"Anonymous node with @type={type_hint!r} has no @id (must be a flat, identified entity)",
+                )
+            )
+
+    # L2 hasPart-reachability check — base MUST: data entities MUST be linked from the
+    # root via hasPart (directly or indirectly). A relative-path File/Dataset reachable
+    # only via mentions/object/result violates the MUST.
+    reachable = _haspart_reachable(graph)
+    for entity in graph:
+        if not isinstance(entity, dict) or not _is_local_data_entity(entity):
+            continue
+        eid = str(entity.get("@id"))
+        if eid not in reachable:
+            findings.append(
+                ValidationFinding(
+                    "ro_crate",
+                    "data_entity_unreachable",
+                    f"Data entity not reachable from root via hasPart: {eid}",
+                    path=eid,
+                )
+            )
     return findings

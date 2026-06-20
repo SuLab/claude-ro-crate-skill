@@ -28,6 +28,22 @@ def _referenced_ids(value: Any) -> list[str]:
     return found
 
 
+def resolve_ref(value: Any, graph: list[dict[str, Any]]) -> Any:
+    """Resolve a possible ``{"@id": "#embedded/..."}`` reference back to its full entity.
+
+    Since the builder node-ifies every inline typed dict (e.g. a PropertyValue) into a
+    top-level ``#embedded/<digest>`` entity and leaves only a reference in the parent
+    (RO-Crate 1.2 MUST: no anonymous inlining; the crate must re-load via ro-crate-py), tests
+    that assert on the *contents* of such a value must dereference it first. Non-reference
+    values (and references to non-embedded ids) are returned unchanged."""
+    if isinstance(value, dict) and set(value.keys()) == {"@id"}:
+        target = value["@id"]
+        by_id = {str(e.get("@id")): e for e in graph}
+        if target in by_id:
+            return by_id[target]
+    return value
+
+
 def assert_no_dangling_refs(graph: list[dict[str, Any]]) -> None:
     """Raise AssertionError if any nested ``{"@id": X}`` reference points to an ``@id``
     not present as a top-level graph entity, excluding allowed external URIs."""
