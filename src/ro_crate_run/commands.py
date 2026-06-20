@@ -23,7 +23,12 @@ from .recovery import ensure_recovered, is_active_run, recover_state
 from .redact import redact_run
 from .redaction import Redactor, redaction_event_payload
 from .runner import CommandRunner
-from .signing import generate_keypair, sign_manifest, signing_available
+from .signing import (
+    generate_keypair,
+    sign_manifest,
+    signing_available,
+    verify_manifest_signature,
+)
 from .state import (
     detect_output_changes,
     ensure_runtime_dirs,
@@ -651,6 +656,36 @@ def do_sign() -> int:
         source_kind="skill_command",
     )
     print("Crate manifest signed (ed25519).")
+    return 0
+
+
+def do_verify() -> int:
+    """Verify the crate manifest signature against the recorded ed25519 public key."""
+    ctx = ProjectContext.from_cwd()
+    if not signing_available():
+        print("Signing unavailable: install 'ro-crate-run[signing]'.", file=sys.stderr)
+        return 1
+    crate = ctx.state_dir / "ro-crate"
+    manifest = crate / "ro-crate-metadata.json"
+    sig_path = crate / "ro-crate-metadata.json.sig"
+    public_path = ctx.state_dir / "keys" / "public.pem"
+    for p, what in (
+        (manifest, "crate manifest"),
+        (sig_path, "signature file"),
+        (public_path, "public key"),
+    ):
+        if not p.exists():
+            print(f"Cannot verify: {what} not found ({p.name}); run rcr sign first.",
+                  file=sys.stderr)
+            return 1
+    ok = verify_manifest_signature(
+        manifest, sig_path.read_text().strip(), public_path.read_text()
+    )
+    if not ok:
+        print("Signature INVALID: the manifest does not match the recorded signature.",
+              file=sys.stderr)
+        return 1
+    print("Signature OK: crate manifest verifies against the recorded ed25519 public key.")
     return 0
 
 

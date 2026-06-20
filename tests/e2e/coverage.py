@@ -4,7 +4,7 @@ _COMMANDS = [
     "start", "resume", "status", "note", "decision", "phase", "step",
     "input", "output", "parameter", "software", "run", "checkpoint",
     "validate", "finalize", "inspect", "redact", "export", "hash",
-    "import-ro-crate", "sign", "config", "abort", "accept", "reject",
+    "import-ro-crate", "sign", "verify", "config", "abort", "accept", "reject",
 ]
 _FLAGS = [
     "flag:start:--mode", "flag:start:--profile", "flag:start:--no-checkpoint",

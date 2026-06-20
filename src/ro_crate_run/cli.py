@@ -116,6 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("import-ro-crate")
     p.add_argument("path")
     sub.add_parser("sign")
+    sub.add_parser("verify")
     p = sub.add_parser("config")
     p.add_argument("key")
     p.add_argument("value")
@@ -207,6 +208,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return commands.import_ro_crate(args.path)
     if args.cmd == "sign":
         return commands.do_sign()
+    if args.cmd == "verify":
+        return commands.do_verify()
     if args.cmd == "config":
         return commands.set_config(args.key, args.value)
     if args.cmd == "abort":

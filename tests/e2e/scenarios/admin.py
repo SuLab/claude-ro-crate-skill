@@ -45,6 +45,12 @@ def _check_public_export(graph: list, result) -> None:
 def _check_sign(graph: list, result) -> None:
     assert _glob(result, "*.sig"), "no .sig signature file produced"
     assert _has_event(result, "crate.signed"), "no crate.signed event"
+    # The signature produced by the real `rcr sign` path must actually verify.
+    env = build_env(result.workdir)
+    proc = subprocess.run(
+        [str(RCR), "verify"], cwd=result.workdir, env=env, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"rcr verify failed on the signed crate: {proc.stderr}"
 
 
 def _check_export_blocked(graph: list, result) -> None:
@@ -148,17 +154,18 @@ SCENARIOS: list[ScenarioSpec] = [
         expected_profile_uri=PROCESS_URI,
         append_system_prompt=STRICT_PREAMBLE,
         coverage_tags=frozenset({
-            "cmd:sign", "feature:signing", "flag:finalize:--sign",
+            "cmd:sign", "cmd:verify", "feature:signing", "flag:finalize:--sign",
         }),
         check=_check_sign,
         prompt=prescriptive_prompt(
-            "Sign the finalized crate with the project key.",
+            "Sign the finalized crate with the project key and verify the signature.",
             [
                 'rcr start "Signed release" --mode advisory --profile process',
                 "rcr run --outputs out.txt -- python3 -c \"open('out.txt','w').write('x\\n')\"",
                 "rcr output out.txt --role result",
                 "rcr checkpoint",
                 "rcr sign",
+                "rcr verify",
                 "rcr finalize --private --sign",
             ],
         ),
