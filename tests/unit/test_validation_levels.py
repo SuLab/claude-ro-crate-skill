@@ -269,6 +269,42 @@ def test_shacl_skips_when_not_strict(tmp_path: Path, monkeypatch) -> None:  # ty
     assert check_shacl(build_context(state_dir, strict=False, public=False)) == []
 
 
+def test_shacl_flags_nonconformance_under_strict(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The conformance machinery (pyshacl + shacl_nonconformant) was never exercised because
+    # no shapes graph ships. Inject a tiny shapes graph and confirm both outcomes.
+    import pytest
+    pytest.importorskip("pyshacl")
+    from rdflib import Graph
+
+    from ro_crate_run.validation import shacl as shacl_mod
+
+    state_dir = _start(tmp_path, monkeypatch)
+    assert main(["checkpoint"]) == 0
+    failing = Graph()
+    failing.parse(data=(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
+        "@prefix schema: <http://schema.org/> .\n"
+        "schema:DatasetShape a sh:NodeShape ;\n"
+        "    sh:targetClass schema:Dataset ;\n"
+        "    sh:property [ sh:path schema:nonexistentRequiredProp ; sh:minCount 1 ] .\n"
+    ), format="turtle")
+    monkeypatch.setattr(shacl_mod, "_load_shapes_graph", lambda: failing)
+    findings = check_shacl(build_context(state_dir, strict=True, public=False))
+    assert any(f.code == "shacl_nonconformant" for f in findings), \
+        "SHACL did not flag a known-violating shape"
+
+    passing = Graph()
+    passing.parse(data=(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
+        "@prefix schema: <http://schema.org/> .\n"
+        "schema:NoTargets a sh:NodeShape ;\n"
+        "    sh:targetClass schema:ThisClassNeverAppears ;\n"
+        "    sh:property [ sh:path schema:x ; sh:minCount 1 ] .\n"
+    ), format="turtle")
+    monkeypatch.setattr(shacl_mod, "_load_shapes_graph", lambda: passing)
+    assert check_shacl(build_context(state_dir, strict=True, public=False)) == []
+
+
 # --- validate_run orchestrator tests ---
 
 

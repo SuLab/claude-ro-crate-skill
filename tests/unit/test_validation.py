@@ -73,9 +73,15 @@ def test_validate_run_accepts_crate_dir(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["start", "Ctx demo"]) == 0
     state_dir = tmp_path / ".ro-crate-run"
-    # Passing an explicit crate_dir must not raise and must still validate structure.
-    report = validate_run(state_dir, public=False, crate_dir=state_dir / "ro-crate")
-    assert report.status in {"passed", "warning", "failed"}
+    # Passing an explicit crate_dir must validate the SAME structure as the default — a
+    # freshly-started run is error-free, and all six levels are evaluated.
+    default = validate_run(state_dir, public=False)
+    explicit = validate_run(state_dir, public=False, crate_dir=state_dir / "ro-crate")
+    assert explicit.status != "failed", f"explicit crate_dir failed: {explicit.errors}"
+    assert explicit.status == default.status, "explicit crate_dir diverged from the default"
+    assert set(explicit.levels) == {
+        "journal", "state", "ro_crate", "profile", "reproducibility", "privacy"
+    }
 
 
 def test_public_validation_fails_on_secret_in_crate(tmp_path: Path, monkeypatch) -> None:

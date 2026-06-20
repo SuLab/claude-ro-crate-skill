@@ -29,4 +29,7 @@ def test_render_includes_commands_and_outputs(
 
 def test_render_preview_html_shim() -> None:
     html_text = preview.render_preview_html({"title": "My Run"})
-    assert "My Run" in html_text
+    # Assert structure, not mere substring presence: the title must be wrapped in a <title>
+    # element and the preview header must be present.
+    assert "<title>My Run</title>" in html_text
+    assert "RO-Crate Run Preview" in html_text
