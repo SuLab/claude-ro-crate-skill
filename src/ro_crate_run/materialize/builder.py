@@ -174,15 +174,18 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     graph.extend(mapping.build_software(model))
     # Honour file_policy.include_git_diff: capture diff when enabled and tree is dirty.
     _maybe_capture_git_diff(model, cfg, project_dir, crate_dir)
-    graph.extend(mapping.build_git(model))
-    graph.extend(mapping.build_environment(model))
-    graph.extend(mapping.build_containers(model))
-    dependency_entities = mapping.build_dependencies(model)
-    graph.extend(dependency_entities)
-    # Reference dependency manifests from the root so they are discoverable (expected
-    # provenance information); without this the lockfile File entity is an orphan.
-    for dep_entity in dependency_entities:
-        root["mentions"].append({"@id": dep_entity["@id"]})
+    # Reference the run's provenance-context entities (git state + diff, environment,
+    # containers, dependency manifests) from the root so they are discoverable expected
+    # information — otherwise they (and any #embedded PropertyValue children) are orphans.
+    context_entities = (
+        mapping.build_git(model)
+        + mapping.build_environment(model)
+        + mapping.build_containers(model)
+        + mapping.build_dependencies(model)
+    )
+    graph.extend(context_entities)
+    for ctx_entity in context_entities:
+        root["mentions"].append({"@id": ctx_entity["@id"]})
 
     # --- Parameters ---
     param_entities = mapping.build_parameters(model)
@@ -475,6 +478,9 @@ def _write_metadata_with_rocrate(crate_dir: Path, data: dict[str, Any]) -> None:
     embedded_entities: dict[str, dict[str, Any]] = {}
     for entity in data["@graph"]:
         crate.add_or_update_jsonld(_rocrate_compatible(dict(entity), embedded_entities))
+    # ro-crate-py needs each nested typed entity (given a synthesized #embedded/* @id) to
+    # exist as a top-level entity so its inline @id reference resolves. These are reachable
+    # via their parent (e.g. #git/state), which is referenced from the root.
     for entity in embedded_entities.values():
         crate.add_or_update_jsonld(entity)
     with tempfile.TemporaryDirectory(prefix="rocrate-py-", dir=crate_dir.parent) as tmp:
@@ -493,6 +499,9 @@ def _rocrate_compatible(value: Any, embedded_entities: dict[str, dict[str, Any]]
             digest = hashlib.sha256(
                 json.dumps(converted, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()[:16]
+            # ro-crate-py requires an @id on a nested typed dict (the crate will not write
+            # without it). This necessarily creates a top-level #embedded/* entity; it is
+            # reachable through its parent (e.g. #git/state) which the root now references.
             converted["@id"] = f"#embedded/{digest}"
             embedded_entities[str(converted["@id"])] = converted
         return converted
