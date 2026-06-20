@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from ro_crate_run.constants import PROFILE_URIS, RO_CRATE_SPEC_URI, is_web_id
-from ro_crate_run.files import sha256_file
+from ro_crate_run.fs import sha256_file
 from ro_crate_run.models import ValidationFinding
 
 from .context import ValidationContext

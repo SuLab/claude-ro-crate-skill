@@ -1,3 +1,5 @@
+"""Filesystem primitives: content hashing and file-metadata records for crate file entities."""
+
 from __future__ import annotations
 
 import hashlib

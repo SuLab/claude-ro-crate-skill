@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .files import file_record
+from .fs import file_record
 from .git import observe_git_state
 from .ids import IdMap
 from .journal import EventWriter

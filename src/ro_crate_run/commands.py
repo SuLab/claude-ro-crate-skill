@@ -19,7 +19,7 @@ from .config import default_config
 from .constants import CONTAINER_MANIFESTS, DEPENDENCY_MANIFESTS
 from .context import ProjectContext
 from .export import finalize
-from .files import sha256_file
+from .fs import sha256_file
 from .git import observe_git_state
 from .journal import EventWriter
 from .materialize.builder import checkpoint

@@ -180,7 +180,7 @@ def record_known_output(state: RcrState, path: str, sha256: str | None) -> bool:
 def detect_output_changes(state_dir: Path, state: RcrState, max_bytes: int) -> bool:
     """Return True if any known output's on-disk content no longer matches its recorded
     sha256 (SPEC §12.2 dirty trigger: known output hashes changed)."""
-    from .files import sha256_file
+    from .fs import sha256_file
 
     project_dir = state_dir.parent
     for out in state.known_outputs:

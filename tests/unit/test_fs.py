@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ro_crate_run.files import file_record, sha256_file
+from ro_crate_run.fs import file_record, sha256_file
 
 
 def test_sha256_file(tmp_path: Path) -> None:

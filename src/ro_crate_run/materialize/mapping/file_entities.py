@@ -17,7 +17,7 @@ def build_file_entity(
     plan: Any, max_hash_bytes: int, formal_parameter_id: str | None = None
 ) -> dict[str, Any]:
     """Return a File or Dataset entity for one ``FilePlan``."""
-    from ro_crate_run.files import file_record
+    from ro_crate_run.fs import file_record
 
     declared = getattr(plan, "declared", {}) or {}
     if getattr(plan, "sensitive", False):
