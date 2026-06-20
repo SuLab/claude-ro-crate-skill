@@ -126,5 +126,9 @@ class EventWriter:
                 load_config(self.state_dir), state_dir=self.state_dir
             ).redact_value(payload)
         except Exception:
-            return payload, False
+            # FAIL CLOSED: a broken redaction policy (e.g. an invalid custom regex) must NOT
+            # cause the original, potentially-secret-bearing payload to be persisted to the
+            # immutable journal. Drop the content, keep only the (non-sensitive) key names,
+            # and mark the event redacted.
+            return {"redaction_error": True, "keys": sorted(map(str, payload.keys()))}, True
         return cast(dict[str, Any], redacted), applied > 0

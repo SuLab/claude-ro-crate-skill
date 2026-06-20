@@ -33,6 +33,34 @@ def test_redact_preserves_original_journal_as_backup(tmp_path: Path, monkeypatch
     assert "redaction.applied" in types
 
 
+def test_append_fails_closed_when_redaction_errors(tmp_path: Path, monkeypatch) -> None:
+    # A broken redaction policy must NOT cause the original (secret-bearing) payload to be
+    # persisted: EventWriter fails closed — content dropped, event flagged redacted.
+    import json
+
+    from ro_crate_run.journal import EventWriter
+
+    monkeypatch.chdir(tmp_path)
+    commands.start("Demo", "monitored", "process", no_checkpoint=True)
+    sd = tmp_path / ".ro-crate-run"
+
+    import ro_crate_run.redaction as redaction_mod
+
+    def _boom(*a, **k):  # type: ignore[no-untyped-def]
+        raise ValueError("invalid custom redaction regex")
+
+    monkeypatch.setattr(redaction_mod.Redactor, "from_config", staticmethod(_boom))
+    EventWriter(sd).append("human.note", {"text": "API_KEY=supersecretvalue"},
+                           source_kind="human_cli")
+
+    journal_text = (sd / "events.ndjson").read_text()
+    assert "supersecretvalue" not in journal_text, "secret persisted despite redaction failure"
+    note = [e for e in read_events(sd) if e["event_type"] == "human.note"][-1]
+    assert note["redacted"] is True
+    assert note["payload"].get("redaction_error") is True
+    assert "supersecretvalue" not in json.dumps(note["payload"])
+
+
 def test_redact_emits_redaction_failed_on_error(tmp_path: Path, monkeypatch) -> None:
     """If _redact_event_journal raises, redaction.failed is emitted."""
     import ro_crate_run.redact as redact_mod
