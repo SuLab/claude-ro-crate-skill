@@ -48,7 +48,7 @@ python -m pytest tests/e2e/test_e2e_coverage.py    # offline: surface-tag matrix
 ## Architecture
 
 ### Event-sourced core (the central design)
-Everything is an append-only hash chain in `.ro-crate-run/events.ndjson`. Each event (`schema_version` `1.1.0`) carries a monotonic `sequence`, `previous_event_hash`/`event_hash`, a source-derived `actor` (`actor_for_source` maps `human_cli`→Person, model prompts→AIModel, hooks/CLI→SoftwareApplication), and the Claude `session_id`. `state.json` is a **derived, recoverable cache** — never a source of truth.
+Everything is an append-only hash chain in `.ro-crate-run/events.ndjson`. Each event (`schema_version` `1.1.0`) carries a monotonic `sequence`, `previous_event_hash`/`event_hash`, a source-derived `actor` (`actor_for_source` maps `human_cli`→Person, model/hook/CLI sources→SoftwareApplication, `ci`→System), and the Claude `session_id`. `state.json` is a **derived, recoverable cache** — never a source of truth.
 
 - **All event writes go through `EventWriter.append()`** (`journal.py`): file lock, fsync, hash-chain link, `state.sequence` bump, and a best-effort mirror to a remote journal when configured. Never write `events.ndjson` directly; never edit past events — only append.
 - `recovery.py::ensure_recovered()` runs at the top of **every** CLI command and hook startup (not just `rcr resume`): it treats the journal as authoritative, marks abandoned `execution.command.started` as blocked, and emits `journal.repair.*`. `recovery.is_active_run()` is the single source for "is a run still active".
@@ -63,7 +63,7 @@ Everything is an append-only hash chain in `.ro-crate-run/events.ndjson`. Each e
 - Bugs in crate output are almost always in the reducer (`run_model.py`) or a `mapping.py` builder, not in stored data.
 
 ### Layered validation (`validation/`)
-`validator.py::validate_run()` builds a `ValidationContext` (`context.py::build_context`) and composes one function per level: `check_journal` (L0), `check_state` (L1, incl. id-map + dirty-accuracy), `check_rocrate` (L2, real JSON-LD expansion via `jsonld.py` using the **vendored contexts** in `src/ro_crate_run/assets/contexts/`), `check_profiles` (L3 process/workflow/provenance rules), `check_reproducibility` (L4 — 9 warnings), `check_privacy` (L5), plus optional `check_shacl`. Convention: reproducibility findings are warnings unless the code ends `_required`; `open_phase`/`open_step` are warnings; **all `privacy`-level findings are errors**. It honors `cfg.validation.*` flags (these are a live contract, not dead config) and populates `recommendations`.
+`validator.py::validate_run()` builds a `ValidationContext` (`context.py::build_context`) and composes one function per level: `check_journal` (L0), `check_state` (L1, incl. id-map + dirty-accuracy), `check_rocrate` (L2, real JSON-LD expansion via `jsonld.py` using the **vendored contexts** in `src/ro_crate_run/assets/contexts/`), `check_profile` (L3 process/workflow/provenance rules), `check_reproducibility` (L4 — 9 warnings), `check_privacy` (L5), plus optional `check_shacl`. Convention: reproducibility findings are warnings unless the code ends `_required`; `open_phase`/`open_step` are warnings; **all `privacy`-level findings are errors**. It honors `cfg.validation.*` flags (these are a live contract, not dead config) and populates `recommendations`.
 
 ### Privacy & public export
 Redaction happens **before persistence** (`redaction.py`; custom patterns via `.ro-crate-run/secrets-redaction.json`, `Redactor.from_config`). `export.py::finalize()` for `--public` **stages the whole crate (including any embedded journal) into `staging/export-crate/`, runs the Level-5 gate over the staged dir, and only zips on success** — so prompts/secrets/journal can't leak. `rcr finalize --sign` / `rcr sign` adds an Ed25519 signature (keys in `.ro-crate-run/keys/`, never exported).
@@ -99,6 +99,6 @@ The `rcr` launchers (`skills/.../scripts/rcr`) and every `hooks/rocrate_*.py` im
 ## Conventions
 
 - Config (`config.json`) is a **contract**: every flag must change behavior and have a test proving it. Dataclasses in `models.py` are hand-(de)serialized in `state.py::_from_dict`/`_to_json` — register new nested config dataclasses there.
-- Golden crates: `tests/golden/` (harness `_compare.py`, `UPDATE_GOLDEN=1` to regenerate) plus `examples/*/expected/`. When materialization changes, regenerate deliberately and confirm the no-dangling-ref invariant.
+- Golden crates: `tests/golden/` (harness `_compare.py`, `UPDATE_GOLDEN=1` to regenerate; fixtures are per-scenario `expected-dimensions.json` files). When materialization changes, regenerate deliberately and confirm the no-dangling-ref invariant.
 - New event types must be registered in the `constants.py` event vocabulary (the L0 validator checks against it).
 - Commits follow Conventional Commits (`feat:`/`fix:`/`refactor:`/`test:`); `main` is the local trunk.

@@ -129,7 +129,7 @@ To install the packaged skill and hooks into another project:
 rcr install-project --target /path/to/project
 ```
 
-`install-project` writes the `ro-crate-run` skill, hook wrappers, vendored
+`install-project` writes the `ro-crate-run` and `ro-crate-run-admin` skills, hook wrappers, vendored
 Python package files, and `.claude/settings.json` hook configuration into the
 target project. Use `--force` to replace an existing installed copy.
 
