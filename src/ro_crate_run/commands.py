@@ -775,8 +775,13 @@ def import_ro_crate(path: str) -> int:
     from .adapters.imports import import_existing_ro_crate
 
     ctx = ProjectContext.from_cwd()
+    try:
+        events = import_existing_ro_crate(Path(path))
+    except ValueError as exc:
+        print(f"import failed: {exc}", file=sys.stderr)
+        return 1
     writer = EventWriter(ctx.state_dir)
-    for event in import_existing_ro_crate(Path(path)):
+    for event in events:
         payload = cast(dict[str, Any], event["payload"])
         writer.append(
             str(event["event_type"]),

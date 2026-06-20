@@ -11,7 +11,18 @@ def _types(entity: dict[str, object]) -> list[str]:
 
 def import_existing_ro_crate(crate: Path) -> list[dict[str, object]]:
     """Import an existing RO-Crate, emitting events for workflows, actions, steps, params, files."""
-    metadata = json.loads((crate / "ro-crate-metadata.json").read_text())
+    meta_path = crate / "ro-crate-metadata.json" if crate.is_dir() else crate
+    if not meta_path.is_file():
+        raise ValueError(
+            f"no RO-Crate metadata found at {meta_path}; pass a crate directory or its "
+            "ro-crate-metadata.json"
+        )
+    try:
+        metadata = json.loads(meta_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{meta_path} is not valid JSON: {exc}") from exc
+    if not isinstance(metadata, dict) or "@graph" not in metadata:
+        raise ValueError(f"{meta_path} is not a valid RO-Crate (missing @graph)")
     events: list[dict[str, object]] = []
     for entity in metadata.get("@graph", []):
         if not isinstance(entity, dict) or "@id" not in entity:

@@ -59,6 +59,16 @@ def _deleted_file_ids(graph: list[dict[str, Any]]) -> set[str]:
     return ids
 
 
+def _entity_existence(entity: dict[str, Any]) -> str | None:
+    """The existence class materialized on a File/Dataset entity (its `existence`
+    additionalProperty PropertyValue), or None."""
+    ap = entity.get("additionalProperty")
+    for prop in (ap if isinstance(ap, list) else [ap]):
+        if isinstance(prop, dict) and prop.get("propertyID") == "existence":
+            return str(prop.get("value"))
+    return None
+
+
 def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     metadata = ctx.metadata
@@ -135,7 +145,9 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         project_path = project_root / eid
         resolved = crate_path if crate_path.exists() else project_path if project_path.exists() else None
         if resolved is None:
-            if eid not in exempt_ids:
+            # Also trust the existence materialized on the entity itself (e.g. imported files
+            # carry a declared-only existence but are not in state.declared_*), not only state.
+            if eid not in exempt_ids and _entity_existence(entity) not in _ABSENT_EXISTENCE:
                 findings.append(ValidationFinding("ro_crate", "referenced_file_missing", f"Referenced file not present: {eid}", path=eid))
             continue
         # Content integrity: a crate's recorded sha256 must match the bytes on disk.

@@ -47,6 +47,25 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
             model.outputs.append(payload)
         elif event.event_type == "workflow.parameter.declared":
             model.parameters.append(payload)
+        elif event.event_type == "workflow.identified":
+            # An imported / engine-identified workflow definition (rcr import-ro-crate).
+            model.workflow = {
+                "path": payload.get("path") or payload.get("workflow_id"),
+                "name": payload.get("name")
+                or Path(str(payload.get("path", "workflow"))).name,
+                "engine": payload.get("engine", "imported-ro-crate"),
+            }
+        elif event.event_type == "file.observed":
+            # A file observed in an imported crate — materialize it as a referenced File
+            # (reachable from root via mentions) rather than silently dropping it.
+            model.inputs.append(
+                {
+                    "path": payload.get("path"),
+                    "role": payload.get("role", "imported"),
+                    "description": payload.get("name") or payload.get("path"),
+                    "existence": "declared-only",
+                }
+            )
         elif event.event_type == "software.observed":
             model.software.append(payload)
         elif event.event_type == "human.note":
