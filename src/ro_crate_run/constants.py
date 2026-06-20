@@ -101,5 +101,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "journal.repair.started",
         "journal.repair.completed",
         "journal.repair.failed",
+        # Catch-all for unmapped Claude lifecycle hooks (original name in payload.hook_event)
+        "hook.unknown",
     }
 )

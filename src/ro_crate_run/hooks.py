@@ -226,8 +226,17 @@ def handle_hook(
             )
         return HookResult()
 
-    event_type = EVENT_MAP.get(event_name, f"hook.{event_name}")
-    writer.append(event_type, _redacted_payload(payload, redactor), source_kind="claude_hook")
+    mapped = EVENT_MAP.get(event_name)
+    if mapped is not None:
+        event_type = mapped
+        out_payload = _redacted_payload(payload, redactor)
+    else:
+        # L7: route any unmapped Claude lifecycle hook to the registered catch-all
+        # type so the L0 event-vocabulary check (and checkpoint) cannot hard-fail on
+        # an unknown event type. Preserve the original event name in the payload.
+        event_type = "hook.unknown"
+        out_payload = _redacted_payload({"hook_event": event_name, **payload}, redactor)
+    writer.append(event_type, out_payload, source_kind="claude_hook")
     return HookResult()
 
 
