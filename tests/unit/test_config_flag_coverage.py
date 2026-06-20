@@ -331,3 +331,25 @@ def test_crate_name_overrides_root_name(tmp_path: Path, monkeypatch) -> None:
     assert _by_id(_graph())["./"]["name"] == "Custom Crate Name"
 
 
+
+
+# ---------------------------------------------------------------------------
+# CLI hygiene: config rejects unknown keys; note/decision visibility is exclusive.
+# ---------------------------------------------------------------------------
+
+
+def test_config_rejects_unknown_keys(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "D", "--no-checkpoint"]) == 0
+    assert main(["config", "totally_unknown", "x"]) == 1
+    assert main(["config", "nonsense.field", "x"]) == 1
+    assert main(["config", "file_policy.not_a_field", "x"]) == 1
+    assert main(["config", "copy_mode", "reference"]) == 0  # a real key still works
+
+
+def test_note_public_private_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "D", "--no-checkpoint"]) == 0
+    with pytest.raises(SystemExit):  # argparse rejects --public + --private together
+        main(["note", "x", "--public", "--private"])

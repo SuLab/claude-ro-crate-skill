@@ -722,13 +722,29 @@ def do_redact(dry_run: bool, apply: bool, policy: str | None = None) -> int:
 
 
 def set_config(key: str, value: str) -> int:
+    from dataclasses import fields, is_dataclass
+
     ctx = ProjectContext.from_cwd()
     cfg = load_config(ctx.state_dir)
     typed = _coerce_config_value(value)
+    # Validate the key against the config schema rather than silently dropping unknown keys.
     if "." in key:
         section, field = key.split(".", 1)
-        setattr(getattr(cfg, section), field, typed)
+        if section not in {f.name for f in fields(cfg)}:
+            print(f"Unknown config section: {section!r}", file=sys.stderr)
+            return 1
+        sub = getattr(cfg, section)
+        if not is_dataclass(sub):
+            print(f"Config key {section!r} is not a section", file=sys.stderr)
+            return 1
+        if field not in {f.name for f in fields(sub)}:
+            print(f"Unknown config field: {section}.{field}", file=sys.stderr)
+            return 1
+        setattr(sub, field, typed)
     else:
+        if key not in {f.name for f in fields(cfg)}:
+            print(f"Unknown config key: {key!r}", file=sys.stderr)
+            return 1
         setattr(cfg, key, typed)
     write_config(ctx.state_dir, cfg)
     EventWriter(ctx.state_dir).append(

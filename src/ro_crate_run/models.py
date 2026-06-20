@@ -265,7 +265,6 @@ class RunModel:
     environment: JsonDict = field(default_factory=dict)
     containers: list[JsonDict] = field(default_factory=list)
     dependencies: list[JsonDict] = field(default_factory=list)
-    actors: list[Actor] = field(default_factory=list)
     # Agent-action families: the Claude Code agent's own actions are the workflow (SPEC §16).
     # Each is projected from journal events the reducer previously dropped.
     file_actions: list[JsonDict] = field(default_factory=list)      # file.created/modified/changed/deleted

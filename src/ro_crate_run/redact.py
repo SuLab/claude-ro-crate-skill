@@ -109,7 +109,11 @@ def _redact_event_journal(state_dir: Path, redactor: Redactor) -> None:
         report_path = state_dir / "reports" / "redacted-events.ndjson"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(payload, encoding="utf-8")
-        journal_path.write_text(payload, encoding="utf-8")
+        # Atomic rewrite (tmp + replace) so a crash mid-write cannot truncate/corrupt the
+        # authoritative journal, matching state.py::write_state.
+        journal_tmp = journal_path.with_suffix(".ndjson.tmp")
+        journal_tmp.write_text(payload, encoding="utf-8")
+        journal_tmp.replace(journal_path)
         state = load_state(state_dir)
         state.sequence = int(redacted_events[-1]["sequence"])
         state.last_event_hash = str(redacted_events[-1]["event_hash"])
