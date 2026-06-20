@@ -148,6 +148,13 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         "hasPart": [],
         "mentions": [],
     }
+    if model.aborted:
+        # Surface an aborted run on the crate root so a consumer can tell it ended early.
+        root["additionalProperty"] = {
+            "@type": "PropertyValue",
+            "propertyID": "run-status",
+            "value": "aborted",
+        }
     graph.extend(
         [
             descriptor,

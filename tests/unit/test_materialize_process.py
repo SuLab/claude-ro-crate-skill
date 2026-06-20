@@ -41,6 +41,28 @@ def test_run_model_collects_declarations_and_commands(tmp_path: Path, monkeypatc
     assert model.commands[0].outputs == ["out.txt"]
 
 
+def test_aborted_run_surfaces_run_status_on_crate_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Abort demo", "--no-checkpoint"]) == 0
+
+    # A non-aborted run carries no run-status marker on the root.
+    assert main(["checkpoint"]) == 0
+    metadata_path = tmp_path / ".ro-crate-run/ro-crate/ro-crate-metadata.json"
+    root = {e["@id"]: e for e in json.loads(metadata_path.read_text())["@graph"]}["./"]
+    assert "additionalProperty" not in root
+
+    # After `rcr abort`, re-checkpointing surfaces an aborted run-status PropertyValue so a
+    # consumer can tell the run ended early.
+    assert main(["abort", "ran out of time"]) == 0
+    assert main(["checkpoint"]) == 0
+    root = {e["@id"]: e for e in json.loads(metadata_path.read_text())["@graph"]}["./"]
+    assert root["additionalProperty"] == {
+        "@type": "PropertyValue",
+        "propertyID": "run-status",
+        "value": "aborted",
+    }
+
+
 def test_checkpoint_writes_ro_crate_12_process_metadata(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["start", "Process crate", "--no-checkpoint"]) == 0
