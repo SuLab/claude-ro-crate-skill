@@ -59,6 +59,18 @@ def test_journal_clean_run_has_no_errors(tmp_path: Path, monkeypatch) -> None:  
     assert [f for f in findings if f.code != "open"] == []
 
 
+def test_journal_flags_unregistered_event_type(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # L0 now enforces the central EVENT_TYPES vocabulary: an event whose type is not
+    # registered is flagged (the registry is no longer decorative).
+    from ro_crate_run.journal import EventWriter
+
+    state_dir = _start(tmp_path, monkeypatch)
+    EventWriter(state_dir).append("totally.bogus.type", {"x": 1}, source_kind="human_cli")
+    findings = check_journal(build_context(state_dir, strict=False, public=False))
+    assert any(f.code == "unknown_event_type" for f in findings), \
+        "L0 did not flag an unregistered event type"
+
+
 def test_journal_detects_hash_tamper(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     state_dir = _start(tmp_path, monkeypatch)
     _corrupt_last_event(state_dir, lambda o: o["payload"].__setitem__("x", "tampered"))

@@ -30,7 +30,6 @@ class FilePolicy:
 
 @dataclass
 class HashPolicy:
-    algorithm: str = "sha256"
     max_file_size_mb: int = 100
     hash_large_files: bool = False
 
@@ -77,13 +76,10 @@ class RcrConfig:
     schema_version: str = "1.0.0"
     mode: str = "monitored"
     default_profile: str = "process"
-    profile_version: str = "0.5"
-    ro_crate_version: str = "1.2"
     project_name: Optional[str] = None
     crate_name: Optional[str] = None
     copy_mode: str = "mixed"
     output_roots: list[str] = field(default_factory=lambda: ["results", "outputs", "reports"])
-    input_roots: list[str] = field(default_factory=lambda: ["data", "inputs"])
     source_roots: list[str] = field(
         default_factory=lambda: ["src", "scripts", "workflow", "workflows"]
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from ro_crate_run.constants import EVENT_TYPES
 from ro_crate_run.events import compute_event_hash
 from ro_crate_run.models import ValidationFinding
 
@@ -51,6 +52,11 @@ def check_journal(ctx: ValidationContext) -> list[ValidationFinding]:
             findings.append(ValidationFinding("journal", "invalid_timestamp", "Event timestamp is not valid ISO-8601 UTC"))
         if not isinstance(event.get("redacted"), bool):
             findings.append(ValidationFinding("journal", "invalid_redaction_marker", "Event 'redacted' marker is not boolean"))
+        if event.get("event_type") not in EVENT_TYPES:
+            findings.append(ValidationFinding(
+                "journal", "unknown_event_type",
+                f"Event type {event.get('event_type')!r} is not in the registered vocabulary",
+            ))
         if event.get("previous_event_hash") != previous:
             findings.append(ValidationFinding("journal", "hash_chain_mismatch", "Previous hash mismatch"))
         if event.get("event_hash") != compute_event_hash(event):

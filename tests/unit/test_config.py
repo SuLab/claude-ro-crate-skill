@@ -19,7 +19,6 @@ def test_default_config_matches_spec() -> None:
     cfg = default_config(project_name="demo")
     assert cfg.mode == "monitored"
     assert cfg.default_profile == "process"
-    assert cfg.ro_crate_version == "1.2"
     assert cfg.profile_uri == PROFILE_URIS["process"]
     assert cfg.privacy.include_prompts is False
     assert cfg.file_policy.include_event_journal is False

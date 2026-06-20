@@ -131,12 +131,14 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
         "@id": "ro-crate-metadata.json",
         "@type": "CreativeWork",
         "about": {"@id": "./"},
+        # Fixed at RO-Crate 1.2 (the descriptor MUST conform to exactly this; SPEC §15.2).
         "conformsTo": {"@id": RO_CRATE_SPEC_URI},
     }
     root: dict[str, Any] = {
         "@id": "./",
         "@type": "Dataset",
-        "name": model.title,
+        # crate_name overrides the run title for the crate's display name when set.
+        "name": cfg.crate_name or model.title,
         "description": model.description,
         "datePublished": published_at,
         "dateCreated": model.created_at,

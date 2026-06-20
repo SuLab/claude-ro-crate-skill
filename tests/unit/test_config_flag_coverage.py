@@ -313,3 +313,21 @@ def test_hash_large_files_overrides_size_gate(tmp_path: Path, monkeypatch) -> No
     entity = _by_id(_graph())["big.bin"]
     assert (entity.get("identifier") or {}).get("propertyID") == "sha256", \
         f"hash_large_files did not override the size gate: {entity}"
+
+
+# ---------------------------------------------------------------------------
+# crate_name — overrides the run title for the crate root's display name.
+# ---------------------------------------------------------------------------
+
+
+def test_crate_name_overrides_root_name(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Run Title", "--no-checkpoint"]) == 0
+    assert main(["checkpoint"]) == 0
+    root = _by_id(_graph())["./"]
+    assert root["name"] == "Run Title"  # default: root name is the run title
+    assert main(["config", "crate_name", "Custom Crate Name"]) == 0
+    assert main(["checkpoint"]) == 0
+    assert _by_id(_graph())["./"]["name"] == "Custom Crate Name"
+
+

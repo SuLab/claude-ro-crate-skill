@@ -80,18 +80,25 @@ class EventWriter:
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
-            # Best-effort remote mirror after fsync — never raises, never blocks the journal.
-            try:
-                from .remote_journal import mirror_event
-                from .state import load_config
+            # Remote mirror after fsync. Best-effort by default (never blocks the
+            # local journal, which is authoritative); when remote_journal.fail_closed is
+            # set, a mirror failure is raised to the caller instead of silently swallowed
+            # (the local event is already committed, but the operator is alerted).
+            from .remote_journal import mirror_event
+            from .state import load_config
 
-                _cfg = load_config(self.state_dir)
-                mirror_event(
-                    _cfg.remote_journal,
+            _rj = load_config(self.state_dir).remote_journal
+            try:
+                _mirror_ok = mirror_event(
+                    _rj,
                     __import__("json").dumps(data, sort_keys=True, separators=(",", ":")),
                 )
-            except Exception:  # pragma: no cover - best-effort mirror
-                pass
+            except Exception:  # pragma: no cover - network/transport failure
+                _mirror_ok = False
+            if not _mirror_ok and getattr(_rj, "fail_closed", False) and getattr(_rj, "enabled", False):
+                raise RuntimeError(
+                    "remote journal mirror failed and remote_journal.fail_closed is set"
+                )
             state.sequence = sequence
             state.last_event_hash = event.event_hash
             state.updated_at = utc_now()
