@@ -28,10 +28,13 @@ def observe_git_state(project_dir: Path) -> dict[str, object]:
     top = run(["rev-parse", "--show-toplevel"])
     if not top:
         return {"available": False}
+    porcelain = run(["status", "--porcelain"]) or ""
     state: dict[str, object] = {
         "available": True,
         "root": top,
-        "status": run(["status", "--porcelain"]) or "",
+        "status": porcelain,
+        # Explicit dirty flag: the reproducibility validator (require_clean_git) keys on it.
+        "dirty": bool(porcelain.strip()),
     }
     # Omit absent fields rather than storing None: event payloads reject JSON null,
     # and a repo with no commit/remote (e.g. fresh `git init`) must not crash start.

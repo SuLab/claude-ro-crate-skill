@@ -36,8 +36,8 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
     # 1. Missing git commit
     if not git.get("commit"):
         warn("missing_git_commit", "No Git commit recorded", required=vcfg.require_git_commit)
-    # 2. Dirty tree without diff
-    if git.get("dirty") and not git.get("diff_path"):
+    # 2. Dirty tree without diff (diff_file is the key set by _maybe_capture_git_diff)
+    if git.get("dirty") and not git.get("diff_file"):
         warn("dirty_tree_no_diff", "Working tree was dirty and no diff captured", required=vcfg.require_clean_git)
     # 3. Missing software versions
     if not ctx.state.known_software:

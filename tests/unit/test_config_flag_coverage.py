@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -117,22 +119,25 @@ def test_public_by_default_changes_unflagged_finalize(tmp_path: Path, monkeypatc
 # default and an ERROR when this flag is set.
 #
 # NOTE: observe_git_state() records `status` (porcelain) but never a `dirty`
-# boolean, so the dirty_tree_no_diff finding is unreachable from a real run. We
-# drive it the way the validator reads it — via an environment.observed event
-# carrying git.dirty — which is exactly the contract check_reproducibility honors.
+# observe_git_state now emits a real `dirty` boolean (from the porcelain status), so the
+# dirty_tree_no_diff finding is reachable from a genuinely dirty working tree.
 # ---------------------------------------------------------------------------
 
 
-def test_require_clean_git_promotes_dirty_warning_to_error(tmp_path: Path, monkeypatch) -> None:
-    from ro_crate_run.journal import EventWriter
+def _git(d: Path, *args: str) -> None:
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", *args], cwd=d, env=env, check=True, capture_output=True)
 
+
+def test_require_clean_git_promotes_dirty_warning_to_error(tmp_path: Path, monkeypatch) -> None:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "init")
+    (tmp_path / "dirty.txt").write_text("uncommitted\n")  # genuinely dirty working tree
     monkeypatch.chdir(tmp_path)
-    assert main(["start", "Demo", "--no-checkpoint"]) == 0
-    EventWriter(_state_dir()).append(
-        "environment.observed",
-        {"git": {"available": True, "dirty": True}},
-        source_kind="cli",
-    )
+    assert main(["start", "Demo", "--mode", "advisory", "--profile", "process",
+                 "--no-checkpoint"]) == 0
+    assert main(["run", "--", "python3", "-c", "print('x')"]) == 0
     assert main(["checkpoint"]) == 0
 
     # Default (require_clean_git=False): dirty tree is a non-required warning.
@@ -141,8 +146,8 @@ def test_require_clean_git_promotes_dirty_warning_to_error(tmp_path: Path, monke
     assert "dirty_tree_no_diff" in warnings
     assert "dirty_tree_no_diff_required" not in errors
 
-    # Required: the same condition is promoted to an error (the _required suffix
-    # makes _is_error treat the reproducibility finding as blocking).
+    # Required: the same condition is promoted to an error (the _required suffix makes
+    # _is_error treat the reproducibility finding as blocking).
     assert main(["config", "validation.require_clean_git", "true"]) == 0
     errors, warnings = _validate_codes()
     assert "dirty_tree_no_diff_required" in errors
