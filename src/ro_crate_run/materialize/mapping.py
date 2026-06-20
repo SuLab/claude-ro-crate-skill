@@ -629,7 +629,13 @@ def build_workflow(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
             if synthetic
             else "Workflow definition"
         ),
-        "programmingLanguage": model.workflow.get("engine", "workflow"),
+        # Reference the engine SoftwareApplication (#actor/engine/<engine>) build_actors emits,
+        # so it is not an orphan; fall back to a plain string for an unknown engine.
+        "programmingLanguage": (
+            {"@id": f"#actor/engine/{model.workflow['engine']}"}
+            if model.workflow.get("engine") and model.workflow["engine"] != "unknown"
+            else model.workflow.get("engine", "workflow")
+        ),
     }
     input_refs = [
         {"@id": formal_param_map[str(item.get("path", ""))]}

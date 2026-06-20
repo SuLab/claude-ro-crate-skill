@@ -77,4 +77,8 @@ def test_workflow_crate_formal_parameters_and_main_entity(
     assert "exampleOfWork" in by_id["in.csv"]
     # Snakefile is the workflow definition → no exampleOfWork
     assert "exampleOfWork" not in by_id["Snakefile"]
+    # programmingLanguage references the engine SoftwareApplication, which is emitted as an
+    # entity (not a bare string), so the reference resolves and is not dangling.
+    assert workflow["programmingLanguage"] == {"@id": "#actor/engine/snakemake"}
+    assert by_id["#actor/engine/snakemake"]["@type"] == "SoftwareApplication"
     assert_no_dangling_refs(graph)

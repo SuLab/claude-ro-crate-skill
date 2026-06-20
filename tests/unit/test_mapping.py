@@ -233,7 +233,9 @@ def test_build_workflow_basic() -> None:
     entity = ents[0]
     assert entity["@id"] == "Snakefile"
     assert set(entity["@type"]) == {"File", "SoftwareSourceCode", "ComputationalWorkflow"}
-    assert entity["programmingLanguage"] == "snakemake"
+    # programmingLanguage references the engine SoftwareApplication build_actors emits,
+    # so it resolves instead of being a bare string literal.
+    assert entity["programmingLanguage"] == {"@id": "#actor/engine/snakemake"}
     assert "HowTo" not in entity["@type"]
 
 
