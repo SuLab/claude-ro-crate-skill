@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from ro_crate_run import commands
@@ -10,6 +11,28 @@ from ro_crate_run.state import read_events
 def _start(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["start", "Run", "--no-checkpoint"]) == 0
+
+
+def test_pump_log_write_error_is_recorded_not_swallowed(tmp_path: Path, monkeypatch) -> None:
+    # If a log write fails in the streaming pump thread, the failure must be recorded on the
+    # command record (truncated logs are visible provenance), not silently swallowed.
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Pump", "--no-checkpoint"]) == 0
+    sd = tmp_path / ".ro-crate-run"
+    logs = sd / "logs"
+    os.chmod(logs, 0o500)  # read-only: the pump's open("w") of a new log file fails
+    try:
+        CommandRunner(sd, tmp_path).run(["python3", "-c", "print('hi')"])
+    finally:
+        os.chmod(logs, 0o755)
+    events = read_events(sd)
+    cmd_events = [
+        e for e in events
+        if e["event_type"] in ("execution.command.completed", "execution.command.failed")
+    ]
+    assert cmd_events, "no command event recorded"
+    assert cmd_events[-1]["payload"].get("log_write_errors"), \
+        "pump log-write failure was swallowed (not recorded on the command)"
 
 
 def test_run_streams_and_redacts_stdout(tmp_path: Path, monkeypatch) -> None:

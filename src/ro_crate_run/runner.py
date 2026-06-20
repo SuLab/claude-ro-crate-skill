@@ -120,16 +120,27 @@ class CommandRunner:
         sidecar_redactions = _write_sidecar(sidecar_path, sidecar, redactor)
         start = time.monotonic()
         stream_counts: dict[str, int] = {"stdout": 0, "stderr": 0}
+        pump_errors: dict[str, str] = {}
 
         def _pump(name: str, pipe: Any, path: Path) -> None:
+            # Runs in a thread; an unhandled exception here would die silently at join(),
+            # leaving the command journaled as completed with truncated logs. Capture any
+            # write/IO failure so it is recorded on the command record instead.
             applied = 0
-            with path.open("w", encoding="utf-8") as handle:
-                for line in iter(pipe.readline, ""):
-                    redacted = redactor.redact_text(line)
-                    handle.write(redacted.text)
-                    applied += redacted.applied
-            stream_counts[name] = applied
-            pipe.close()
+            try:
+                with path.open("w", encoding="utf-8") as handle:
+                    for line in iter(pipe.readline, ""):
+                        redacted = redactor.redact_text(line)
+                        handle.write(redacted.text)
+                        applied += redacted.applied
+            except OSError as exc:
+                pump_errors[name] = f"{type(exc).__name__}: {exc}"
+            finally:
+                stream_counts[name] = applied
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
 
         try:
             proc = subprocess.Popen(
@@ -226,6 +237,8 @@ class CommandRunner:
                 "output_snapshots": outputs_after,
             }
         )
+        if pump_errors:
+            sidecar["log_write_errors"] = pump_errors
         sidecar_redactions += _write_sidecar(sidecar_path, sidecar, redactor)
         payload = {
             "command_id": command_id,
@@ -243,6 +256,9 @@ class CommandRunner:
             "inputs": inputs,
             "outputs": outputs,
         }
+        if pump_errors:
+            # Surface truncated/incomplete logs on the command record (not silently lost).
+            payload["log_write_errors"] = pump_errors
         failure_payload: dict[str, Any] = {}
         if returncode != 0:
             failure_payload["failure_class"] = failure_class or "nonzero_exit"
