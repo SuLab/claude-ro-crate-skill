@@ -29,10 +29,14 @@ _EXISTENCE = [f"existence:{v}" for v in (
     "observed local", "observed remote", "generated", "expected", "missing", "declared-only",
 )]
 _ENTITIES = [f"entity:{t}" for t in (
+    # NB: OrganizeAction is intentionally absent — Provenance Run Crate 0.5 reserves it for
+    # the workflow-engine orchestration run (instrument->engine, object->ControlActions,
+    # result->workflow CreateAction), which this tool does not emit; subagent/phase actions
+    # are materialized as a generic schema.org Action instead.
     "Person", "SoftwareApplication", "Dataset", "File", "CreateAction", "UpdateAction",
     "DeleteAction", "Action", "ControlAction", "FormalParameter", "PropertyValue",
     "HowToStep", "ComputationalWorkflow", "ContainerImage", "CreativeWork",
-    "Profile", "ParameterConnection", "Thing", "OrganizeAction", "AssessAction",
+    "Profile", "ParameterConnection", "Thing", "AssessAction",
 )]
 _PROPS = [f"prop:{p}" for p in (
     "action:object", "action:result", "action:instrument", "action:agent",

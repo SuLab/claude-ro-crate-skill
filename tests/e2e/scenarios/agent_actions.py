@@ -68,9 +68,11 @@ def _check_file_edit(graph: list, result) -> None:
 
 def _check_subagent(graph: list, result) -> None:
     subagents = _by_prefix(graph, "#subagent/")
-    assert subagents, "no #subagent/* OrganizeAction (subagent dispatch not captured)"
-    assert any("OrganizeAction" in _types(e) for e in subagents), \
-        f"#subagent present but not an OrganizeAction: {[_types(e) for e in subagents]}"
+    assert subagents, "no #subagent/* Action (subagent dispatch not captured)"
+    # Provenance Run Crate 0.5 reserves OrganizeAction for the workflow-engine orchestration
+    # run, so a subagent dispatch is materialized as a generic schema.org Action.
+    assert any("Action" in _types(e) for e in subagents), \
+        f"#subagent present but not an Action: {[_types(e) for e in subagents]}"
 
 
 def _check_assess(graph: list, result) -> None:
@@ -156,13 +158,13 @@ SCENARIOS: list[ScenarioSpec] = [
         append_system_prompt=STRICT_PREAMBLE,
         coverage_tags=frozenset({
             "feature:subagent-action",
-            "entity:OrganizeAction",
+            "entity:Action",
         }),
         check=_check_subagent,
         prompt=prescriptive_prompt(
             "Capture provenance of dispatching a subagent. Use the Task tool to dispatch "
             "one subagent that reads notes.txt and reports its single line; rcr records "
-            "the dispatch as an OrganizeAction.",
+            "the dispatch as an Action.",
             [
                 'rcr start "Agent subagent" --mode advisory --profile auto',
                 "Dispatch a Task subagent to read notes.txt and report its contents",
