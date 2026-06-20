@@ -25,7 +25,7 @@
   ],
   "root_hasPart": [],
   "root_mainEntity": null,
-  "root_mentions_count": 1,
+  "root_mentions_count": 4,
   "stable_file_ids": [
     ".ro-crate-run/commands/cmd_000004.json",
     ".ro-crate-run/logs/cmd_000004.stderr.txt",

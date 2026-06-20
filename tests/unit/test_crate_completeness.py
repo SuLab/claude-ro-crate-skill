@@ -84,3 +84,23 @@ def test_dependency_manifest_has_sha256_and_is_reachable(tmp_path: Path, monkeyp
     digest = (req.get("identifier") or {}).get("value", "")
     assert len(digest) == 64, f"dependency manifest missing sha256: {req}"
     assert "requirements.txt" in reachable_ids(graph), "dependency manifest is an orphan"
+
+
+def test_no_orphan_embedded_entities_and_sidecars_reachable(tmp_path: Path, monkeypatch) -> None:
+    # ro-crate-py's orphaned top-level #embedded/* duplicates are pruned, and command
+    # sidecar/log Files are reachable from the root (referenced via mentions).
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "E", "--mode", "advisory", "--profile", "process", "--no-checkpoint"]) == 0
+    assert main(["run", "--outputs", "o.txt", "--", "python3", "-c",
+                 "open('o.txt','w').write('x\\n')"]) == 0
+    assert main(["output", "o.txt", "--role", "result"]) == 0
+    assert main(["checkpoint"]) == 0
+
+    graph = _graph(tmp_path)
+    assert_no_dangling_refs(graph)
+    seen = reachable_ids(graph)
+    embedded = [e["@id"] for e in graph if str(e.get("@id", "")).startswith("#embedded/")]
+    assert all(e in seen for e in embedded), f"orphan #embedded entities remain: {embedded}"
+    sidecars = [e["@id"] for e in graph if str(e.get("@id", "")).startswith(".ro-crate-run/")]
+    assert sidecars and all(s in seen for s in sidecars), \
+        "command sidecar/log files are not reachable from the root"

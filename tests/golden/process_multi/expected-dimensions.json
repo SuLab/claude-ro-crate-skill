@@ -36,7 +36,6 @@
     "File": 9,
     "Person": 1,
     "Profile": 1,
-    "PropertyValue": 5,
     "SoftwareApplication": 5
   },
   "root_conformsTo": [
@@ -47,7 +46,7 @@
     "step1.txt"
   ],
   "root_mainEntity": null,
-  "root_mentions_count": 3,
+  "root_mentions_count": 9,
   "stable_file_ids": [
     ".ro-crate-run/commands/cmd_000005.json",
     ".ro-crate-run/commands/cmd_000007.json",

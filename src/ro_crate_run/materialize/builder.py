@@ -249,7 +249,11 @@ def write_crate(state_dir: Path, model: RunModel, *, published_at: Optional[str]
     for command in model.commands:
         entities = mapping.build_command_action(command, id_map, project_dir)
         graph.extend(entities)
-        root["mentions"].append({"@id": entities[0]["@id"]})
+        # Reference the action AND its sidecar/log File entities from the root so the
+        # command's invocation record + logs are reachable (they carry about->action, but
+        # that alone leaves them undiscoverable by a downward walk from the root).
+        for e in entities:
+            root["mentions"].append({"@id": e["@id"]})
         # Copy logs/sidecars
         for rel in (command.sidecar, command.stdout_log, command.stderr_log):
             if rel and log_should_copy(rel, project_dir, cfg):
@@ -486,6 +490,37 @@ def _write_metadata_with_rocrate(crate_dir: Path, data: dict[str, Any]) -> None:
     with tempfile.TemporaryDirectory(prefix="rocrate-py-", dir=crate_dir.parent) as tmp:
         crate.write(tmp)
         shutil.copy2(Path(tmp) / "ro-crate-metadata.json", crate_dir / "ro-crate-metadata.json")
+    _prune_orphan_embedded(crate_dir / "ro-crate-metadata.json")
+
+
+def _prune_orphan_embedded(metadata_path: Path) -> None:
+    """Remove the top-level #embedded/* entities ro-crate-py promotes but then leaves
+    unreferenced (it serializes the nested PropertyValues inline without an @id). The inline
+    data is preserved; only the orphaned duplicate top-level entries are dropped."""
+    doc = json.loads(metadata_path.read_text())
+    graph = doc.get("@graph", [])
+    referenced: set[str] = set()
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "@id" and isinstance(item, str):
+                    referenced.add(item)
+                else:
+                    _collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                _collect(item)
+
+    for entity in graph:
+        _collect({k: v for k, v in entity.items() if k != "@id"})  # refs in property values
+    pruned = [
+        e for e in graph
+        if not (str(e.get("@id", "")).startswith("#embedded/") and e.get("@id") not in referenced)
+    ]
+    if len(pruned) != len(graph):
+        doc["@graph"] = pruned
+        metadata_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
 def _rocrate_compatible(value: Any, embedded_entities: dict[str, dict[str, Any]]) -> Any:
