@@ -84,6 +84,43 @@ def test_validate_run_accepts_crate_dir(tmp_path: Path, monkeypatch) -> None:
     }
 
 
+def test_validate_run_emits_started_event_without_dirtying_crate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    # `rcr start` checkpoints, leaving a clean (non-dirty) crate.
+    assert main(["start", "Validation events"]) == 0
+    state_dir = tmp_path / ".ro-crate-run"
+
+    def _events() -> list[dict]:
+        return [json.loads(line) for line in (state_dir / "events.ndjson").read_text().splitlines()]
+
+    # Non-strict validation of a freshly-checkpointed run passes (warnings only) → the bracket
+    # closes with crate.validation.completed, which preserves the clean dirty state.
+    report = validate_run(state_dir, strict=False, public=False)
+    assert report.status != "failed"
+    events = _events()
+    types = [e["event_type"] for e in events]
+    # A validation run brackets its work: started immediately precedes completed.
+    assert "crate.validation.started" in types
+    last_start = len(types) - 1 - types[::-1].index("crate.validation.started")
+    assert types[last_start + 1] == "crate.validation.completed"
+    started = events[last_start]
+    assert started["payload"] == {"strict": False, "public": False}
+    assert started["actor"]["type"] == "SoftwareApplication"
+
+    # Validation observes the projection; the started/completed bracket must NOT mark the crate
+    # dirty (otherwise a standalone `rcr validate` would make a fresh crate look stale).
+    from ro_crate_run.state import load_state
+
+    assert load_state(state_dir).dirty is False
+
+    # append_event=False suppresses both bracket events.
+    before = len(_events())
+    validate_run(state_dir, append_event=False)
+    assert len(_events()) == before
+
+
 def test_public_validation_fails_on_secret_in_crate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["start", "Secret demo"]) == 0

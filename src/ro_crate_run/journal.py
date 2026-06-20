@@ -104,7 +104,7 @@ class EventWriter:
             state.updated_at = utc_now()
             if event_type == "crate.checkpoint.completed":
                 state.dirty = False
-            elif event_type == "crate.validation.completed":
+            elif event_type in {"crate.validation.started", "crate.validation.completed"}:
                 # Validation observes the current projection, but it does not materialize
                 # events into the crate. Preserve the prior dirty state so standalone
                 # `rcr validate` cannot make a stale crate look fresh.

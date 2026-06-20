@@ -43,6 +43,11 @@ def validate_run(
     crate_dir: Path | None = None,
 ) -> ValidationReport:
     ctx = build_context(state_dir, strict=strict, public=public, crate_dir=crate_dir)
+    if append_event:
+        EventWriter(state_dir).append(
+            "crate.validation.started", {"strict": strict, "public": public},
+            source_kind="validator",
+        )
 
     findings: list[ValidationFinding] = []
     findings += check_journal(ctx)
