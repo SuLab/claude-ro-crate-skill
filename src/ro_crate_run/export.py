@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from .journal import EventWriter
@@ -18,6 +19,7 @@ def finalize(
     public: bool = False,
     include_event_journal: bool = False,
     out: Path | None = None,
+    sign_fn: Callable[[], int] | None = None,
 ) -> int:
     state = load_state(state_dir)
     if state.dirty or not state.last_checkpoint:
@@ -85,6 +87,16 @@ def finalize(
         journal_src = state_dir / "events.ndjson"
         if journal_src.exists():
             shutil.copy2(journal_src, canon)
+    # Sign BEFORE zipping so the signature ships inside the archive (do_sign signs the
+    # canonical manifest, which is byte-identical to the staged copy).
+    if sign_fn is not None:
+        sign_rc = sign_fn()
+        if sign_rc != 0:
+            shutil.rmtree(staging, ignore_errors=True)
+            return sign_rc
+        sig = state_dir / "ro-crate" / "ro-crate-metadata.json.sig"
+        if sig.exists():
+            shutil.copy2(sig, staging / "ro-crate-metadata.json.sig")
     if zip_output:
         export_zip(
             staging,

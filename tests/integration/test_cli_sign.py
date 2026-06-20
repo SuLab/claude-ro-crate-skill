@@ -40,3 +40,29 @@ def test_verify_without_signature_fails_cleanly(tmp_path: Path, monkeypatch) -> 
     monkeypatch.chdir(tmp_path)
     assert main(["start", "Unsigned", "--profile", "process"]) == 0
     assert main(["verify"]) == 1, "verify with no signature must fail (not crash)"
+
+
+def test_finalize_sign_ships_signature_in_zip(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # `finalize --zip --sign` must sign BEFORE zipping so the .sig is inside the archive.
+    import zipfile
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Signed", "--profile", "process"]) == 0
+    assert main(["finalize", "--private", "--zip", "--sign"]) == 0
+    zips = list((tmp_path / ".ro-crate-run").glob("*.zip"))
+    assert zips, "no zip produced"
+    with zipfile.ZipFile(zips[0]) as archive:
+        names = archive.namelist()
+    assert any(n.endswith("ro-crate-metadata.json.sig") for n in names), \
+        f"signature not shipped inside the zip: {names}"
+
+
+def test_sign_regenerates_missing_public_key(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Signed", "--profile", "process"]) == 0
+    assert main(["sign"]) == 0
+    (tmp_path / ".ro-crate-run" / "keys" / "public.pem").unlink()  # lose the public key
+    assert main(["sign"]) == 0
+    assert (tmp_path / ".ro-crate-run" / "keys" / "public.pem").exists(), \
+        "public.pem was not regenerated from the existing private key"
+    assert main(["verify"]) == 0, "verify must work after public.pem regeneration"

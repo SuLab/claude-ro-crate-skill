@@ -25,6 +25,7 @@ from .redaction import Redactor, redaction_event_payload
 from .runner import CommandRunner
 from .signing import (
     generate_keypair,
+    public_key_from_private,
     sign_manifest,
     signing_available,
     verify_manifest_signature,
@@ -644,6 +645,10 @@ def do_sign() -> int:
     public_path = keys_dir / "public.pem"
     if private_path.exists():
         private_pem = private_path.read_text()
+        # Recreate public.pem from the private key if it went missing, so `rcr verify`
+        # (which needs the public key) keeps working.
+        if not public_path.exists():
+            public_path.write_text(public_key_from_private(private_pem))
     else:
         private_pem, public_pem = generate_keypair()
         private_path.write_text(private_pem)
@@ -699,16 +704,14 @@ def do_finalize(
     ctx = ProjectContext.from_cwd()
     cfg = load_config(ctx.state_dir)
     resolved = cfg.privacy.public_by_default if public is None else public
-    rc = finalize(
+    return finalize(
         ctx.state_dir,
         zip_output=zip_output,
         public=resolved,
         include_event_journal=include_event_journal,
         out=Path(out) if out else None,
+        sign_fn=do_sign if sign else None,
     )
-    if rc == 0 and sign:
-        return do_sign()
-    return rc
 
 
 def do_redact(dry_run: bool, apply: bool, policy: str | None = None) -> int:

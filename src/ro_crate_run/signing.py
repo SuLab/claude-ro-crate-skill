@@ -44,6 +44,17 @@ def generate_keypair() -> tuple[str, str]:
     return private_pem, public_pem
 
 
+def public_key_from_private(private_pem: str) -> str:
+    """Derive the Ed25519 public-key PEM from a private-key PEM."""
+    serialization, _ = _require()  # type: ignore[no-untyped-call]
+    private = serialization.load_pem_private_key(private_pem.encode(), password=None)
+    pem = private.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    return str(pem)
+
+
 def sign_manifest(path: Path, private_pem: str) -> str:
     """Sign the contents of a file with an Ed25519 private key. Returns base64 signature."""
     serialization, _ = _require()  # type: ignore[no-untyped-call]
