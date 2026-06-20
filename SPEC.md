@@ -233,14 +233,14 @@ Use this for a single repository:
         workflow-run-crate/
         provenance-run-crate/
   hooks/
-    rocrate_hook.py
     rocrate_session_start.py
     rocrate_user_prompt.py
     rocrate_pre_tool_use.py
     rocrate_post_tool_use.py
     rocrate_post_tool_failure.py
-    rocrate_permission.py
     rocrate_post_tool_batch.py
+    rocrate_file_changed.py
+    rocrate_permission.py
     rocrate_cwd_changed.py
     rocrate_worktree.py
     rocrate_task.py
@@ -267,7 +267,7 @@ ro-crate-run-plugin/
       examples/
   hooks/
     hooks.json
-    rocrate_hook.py
+    rocrate_*.py
     ...
   templates/
     settings.rocrate.json
