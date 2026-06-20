@@ -228,10 +228,6 @@ Use this for a single repository:
         rocrate_finalize.py
         rocrate_redact.py
         rocrate_inspect.py
-      examples/
-        process-run-crate/
-        workflow-run-crate/
-        provenance-run-crate/
   hooks/
     rocrate_session_start.py
     rocrate_user_prompt.py
@@ -264,7 +260,6 @@ ro-crate-run-plugin/
       SKILL.md
       references/
       scripts/
-      examples/
   hooks/
     hooks.json
     rocrate_*.py
@@ -460,18 +455,27 @@ rcr phase NAME [--complete-current]
 rcr phase complete [NAME]
 rcr step start STEP_ID_OR_NAME [--workflow-step ID] [--description TEXT]
 rcr step end STEP_ID_OR_NAME [--status completed|failed|skipped]
-rcr input PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--copy|--reference]
-rcr output PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--copy|--reference]
-rcr parameter NAME VALUE [--formal-parameter ID] [--type TYPE]
+rcr input PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--public|--private] [--copy|--reference]
+rcr output PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--public|--private] [--copy|--reference]
+rcr parameter NAME VALUE [--formal-parameter ID] [--type TYPE] [--connect-from ID] [--connect-to ID]
 rcr software COMMAND_OR_NAME [--version VERSION] [--type TYPE]
 rcr run [--step STEP] [--inputs PATHS] [--outputs PATHS] -- COMMAND [ARGS...]
 rcr checkpoint [--profile process|workflow|provenance|auto]
 rcr validate [--strict] [--json]
-rcr finalize [--zip] [--include-event-journal] [--public|--private]
-rcr inspect [--events] [--crate] [--graph]
+rcr finalize [--zip] [--include-event-journal] [--sign] [--public|--private]
+rcr inspect [--events] [--crate] [--graph] [--html]
 rcr redact [--dry-run] [--apply] [--policy FILE]
 rcr export [--zip] [--out PATH]
 rcr hash PATH_OR_URI
+rcr container REF [--digest DIGEST]
+rcr sign
+rcr verify
+rcr import-ro-crate PATH
+rcr install-project [--target DIR] [--force]
+rcr config KEY VALUE
+rcr accept [TEXT]
+rcr reject [TEXT]
+rcr abort [REASON]
 ```
 
 ### 9.3 `rcr start`
@@ -676,7 +680,7 @@ The hook MUST include remediation instructions in stderr.
 
 ### 11.1 Format
 
-`events.ndjson` is newline-delimited JSON. Each line is exactly one JSON object. The journal is append-only except for explicit repair/redaction workflows that produce a replacement journal and preserve tombstone/redaction events.
+`events.ndjson` is newline-delimited JSON. Each line is exactly one JSON object. The journal is append-only except for explicit repair/redaction workflows that produce a replacement journal (preserving the prior journal as a timestamped backup) and recompute the hash chain.
 
 ### 11.2 Base event schema
 
@@ -686,13 +690,13 @@ Every event MUST contain:
 {
   "event_id": "evt_...",
   "event_type": "execution.command.completed",
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "run_id": "run_...",
   "session_id": "optional-claude-session-id",
   "sequence": 42,
   "timestamp": "2026-06-17T21:24:01.123456Z",
   "actor": {
-    "type": "Person|SoftwareApplication|AIModel|System",
+    "type": "Person|SoftwareApplication|System",
     "id": "actor:...",
     "name": "..."
   },
@@ -734,6 +738,7 @@ run.resumed
 run.config.updated
 run.finalized
 run.aborted
+run.export.blocked
 ```
 
 #### Session lifecycle
@@ -751,8 +756,6 @@ session.stop.failed
 human.prompt
 human.note
 human.decision
-human.declared_input
-human.declared_output
 human.accepted_result
 human.rejected_result
 ```
@@ -767,6 +770,7 @@ workflow.step.identified
 workflow.step.started
 workflow.step.completed
 workflow.step.failed
+workflow.step.skipped
 workflow.parameter.declared
 workflow.input.declared
 workflow.output.declared
@@ -802,9 +806,6 @@ file.created
 file.modified
 file.deleted
 file.changed
-file.hashed
-dataset.observed
-dataset.hashed
 ```
 
 #### Software and environment
@@ -814,7 +815,6 @@ software.observed
 environment.observed
 environment.cwd.changed
 container.observed
-git.state.observed
 git.worktree.created
 git.worktree.removed
 dependency.lockfile.observed
@@ -837,9 +837,11 @@ conversation.compaction.completed
 crate.checkpoint.started
 crate.checkpoint.completed
 crate.checkpoint.failed
+crate.validation.started
 crate.validation.completed
 crate.validation.failed
 crate.finalized
+crate.signed
 ```
 
 #### Redaction and repair
@@ -1674,13 +1676,10 @@ Default `.ro-crate-run/config.json`:
   "schema_version": "1.0.0",
   "mode": "monitored",
   "default_profile": "process",
-  "profile_version": "0.5",
-  "ro_crate_version": "1.2",
   "project_name": null,
   "crate_name": null,
   "copy_mode": "mixed",
   "output_roots": ["results", "outputs", "reports"],
-  "input_roots": ["data", "inputs"],
   "source_roots": ["src", "scripts", "workflow", "workflows"],
   "ignore_patterns": [
     ".git/**",
@@ -1690,10 +1689,9 @@ Default `.ro-crate-run/config.json`:
     "__pycache__/**",
     ".mypy_cache/**",
     ".pytest_cache/**",
-    ".ro-crate-run/staging/**"
+    ".ro-crate-run/**"
   ],
   "hash_policy": {
-    "algorithm": "sha256",
     "max_file_size_mb": 100,
     "hash_large_files": false
   },
@@ -1704,7 +1702,8 @@ Default `.ro-crate-run/config.json`:
     "include_source_code": "private-only",
     "include_git_diff": "private-only",
     "include_event_journal": false,
-    "max_log_size_mb": 10
+    "max_log_size_mb": 10,
+    "max_file_size_mb": 100
   },
   "privacy": {
     "include_prompts": false,
@@ -1727,7 +1726,15 @@ Default `.ro-crate-run/config.json`:
     "require_software_versions": true,
     "require_date_published": true,
     "require_privacy_gate": true
-  }
+  },
+  "remote_journal": {
+    "enabled": false,
+    "type": "http",
+    "endpoint": null,
+    "timeout_seconds": 5,
+    "fail_closed": false
+  },
+  "profile_uri": ""
 }
 ```
 
@@ -1741,7 +1748,7 @@ Default `.ro-crate-run/config.json`:
 - `rocrate` / ro-crate-py, pinned after integration testing.
 - JSON Schema or Pydantic for event validation.
 - `filelock` or equivalent for cross-platform locks.
-- Optional: `rdflib` for JSON-LD expansion checks.
+- `rdflib` for JSON-LD expansion checks (mandatory runtime dependency).
 - Optional: `pyshacl` for SHACL profile checks.
 - Optional: `python-magic` or standard MIME detection fallback.
 
