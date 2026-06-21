@@ -74,7 +74,7 @@ class CommandRunner:
         sidecar_path: Path,
         sidecar: dict[str, Any],
         redactor: Redactor,
-        sidecar_redactions: int,
+        extra_applied: int,
         redaction_results: list[RedactionResult],
         terminal_payload: dict[str, Any],
         event_type: str,
@@ -85,21 +85,24 @@ class CommandRunner:
         Persists the (final) sidecar, appends the completed/failed event with the
         already-assembled payload, then emits the redaction tally via the
         canonical ``redaction_event_payload`` builder so the event carries real
-        category names instead of a hardcoded empty list. The sidecar write's own
-        redaction count is folded in as a category-less result, keeping the
-        ``applied`` total identical while populating ``categories`` where known.
+        category names instead of a hardcoded empty list. ``extra_applied`` holds
+        count-only tallies (the sidecar writes and, on normal exit, the stream
+        pumps) whose matched categories are unknown; it is summed into the final
+        sidecar write's count and folded into the tally via the count-only seam,
+        keeping ``applied`` exact while ``categories`` carries only known names.
         """
-        sidecar_redactions += _write_sidecar(sidecar_path, sidecar, redactor)
+        extra_applied += _write_sidecar(sidecar_path, sidecar, redactor)
         writer.append(
             event_type,
             terminal_payload,
             source_kind="human_cli",
             step_id=step,
         )
-        # Fold the sidecar's integer-only redaction count into the tally as a
-        # result with no categories (we have a count but not the matched names).
-        results = [*redaction_results, RedactionResult("", sidecar_redactions, ())]
-        payload = redaction_event_payload("execution.command", *results)
+        payload = redaction_event_payload(
+            "execution.command",
+            *redaction_results,
+            extra_applied=extra_applied,
+        )
         if payload["applied"]:
             writer.append(
                 "redaction.applied",
@@ -260,7 +263,7 @@ class CommandRunner:
                 sidecar_path=sidecar_path,
                 sidecar=sidecar,
                 redactor=redactor,
-                sidecar_redactions=sidecar_redactions,
+                extra_applied=sidecar_redactions,
                 redaction_results=[*argv_results, stderr_result],
                 terminal_payload={
                     "command_id": command_id,
@@ -335,19 +338,16 @@ class CommandRunner:
             if signal_num is not None:
                 payload["signal"] = signal_num
         # The streaming pumps tally how many redactions they applied but not which
-        # categories; surface them as count-only results so the tally total stays
-        # exact while argv categories are still reported.
-        stream_results = [
-            RedactionResult("", stream_counts["stdout"], ()),
-            RedactionResult("", stream_counts["stderr"], ()),
-        ]
+        # categories; fold their counts into the count-only seam so the tally total
+        # stays exact while argv categories are still reported.
+        stream_redactions = stream_counts["stdout"] + stream_counts["stderr"]
         self._finalize(
             writer=writer,
             sidecar_path=sidecar_path,
             sidecar=sidecar,
             redactor=redactor,
-            sidecar_redactions=sidecar_redactions,
-            redaction_results=[*argv_results, *stream_results],
+            extra_applied=sidecar_redactions + stream_redactions,
+            redaction_results=argv_results,
             terminal_payload=payload,
             event_type=(
                 "execution.command.completed" if returncode == 0 else "execution.command.failed"

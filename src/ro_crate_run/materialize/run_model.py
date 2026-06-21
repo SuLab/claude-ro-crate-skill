@@ -14,6 +14,7 @@ from ro_crate_run.constants import (
     SUBAGENT_EVENT_TYPES,
 )
 from ro_crate_run.events import event_from_dict
+from ro_crate_run.materialize.mapping._helpers import file_op_from_event
 from ro_crate_run.models import CommandRecord, RcrEvent, RunModel
 from ro_crate_run.state import load_state, read_events
 
@@ -346,7 +347,9 @@ def _reduce_file_action(
     model.agent_activity.file_actions.append({
         "path": str(payload.get("path", "")),
         "tool_name": str(payload.get("tool_name", "")),
-        "op": event.event_type.split(".", 1)[1],
+        # event->op via the single file-op vocabulary, so the stored op (consumed by the
+        # action builder's op->action-type lookup) stays coherent with the hook's emission.
+        "op": file_op_from_event(event.event_type),
         "timestamp": event.timestamp,
         "sequence": event.sequence,
         "step_id": event.step_id,

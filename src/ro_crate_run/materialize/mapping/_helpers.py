@@ -6,13 +6,16 @@ fragment-id scheme, the sha256 identifier shape, null-stripping, on-disk content
 schema.org command action-type classifier, and the Bioschemas FormalParameter profile
 contextual entity.
 
-The verb/op/status classification tables (`FILE_OP_TYPE`, `DELETE_TOOLS`, `STEP_STATUS_URI`)
+The verb/op/status classification tables (`FILE_OPS`, `DELETE_TOOLS`, `STEP_STATUS_URI`)
 live here so every observed-thing → schema.org-class/status-URI mapping is discoverable and
-editable in one place.
+editable in one place. `FILE_OPS` (with `TOOL_FILE_OP`) is the one source for the agent
+file-edit vocabulary, exposing `file_event_for_tool` / `file_op_from_event` /
+`file_action_type` so the hook, the reducer, and the action builder all route through it.
 """
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -126,13 +129,68 @@ def _content_size(rel: str, project_dir: os.PathLike[str] | str) -> str | None:
     return None
 
 
-# How an observed file mutation verb maps to a schema.org action type.
-FILE_OP_TYPE = {
-    "created": "CreateAction",
-    "modified": "UpdateAction",
-    "changed": "UpdateAction",
-    "deleted": "DeleteAction",
+# Unified file-op vocabulary: one coherent source for the agent file-edit ops, so adding
+# an op is a single edit here rather than coordinating three tables. Each op maps to its
+# journal event type (emitted by the hook) AND its schema.org action type (emitted in the
+# crate); the tool->op table maps each Claude file-editing tool onto one of these ops. The
+# three sites that used to hold their own copy — hooks (tool->event), run_model (event->op),
+# this module (op->action-type) — route through the derivations below.
+@dataclass(frozen=True)
+class FileOp:
+    """One agent file-edit op: its journal event type and its schema.org action type."""
+
+    event_type: str
+    action_type: str
+
+
+FILE_OPS: dict[str, FileOp] = {
+    "created": FileOp("file.created", "CreateAction"),
+    "modified": FileOp("file.modified", "UpdateAction"),
+    "changed": FileOp("file.changed", "UpdateAction"),
+    "deleted": FileOp("file.deleted", "DeleteAction"),
 }
+
+# Claude file-editing tool name -> file op. Write creates; the edit tools modify.
+TOOL_FILE_OP: dict[str, str] = {
+    "Write": "created",
+    "Edit": "modified",
+    "MultiEdit": "modified",
+    "NotebookEdit": "modified",
+}
+
+# Reverse index event_type -> op name, derived from FILE_OPS so it cannot drift.
+_OP_BY_EVENT: dict[str, str] = {spec.event_type: op for op, spec in FILE_OPS.items()}
+
+
+def file_event_for_tool(tool_name: str) -> str | None:
+    """Return the ``file.*`` journal event type a file-editing tool emits, or None.
+
+    None for any tool that is not a recognized file-editing tool, so the caller falls back
+    to its non-file handling.
+    """
+    op = TOOL_FILE_OP.get(tool_name)
+    return FILE_OPS[op].event_type if op is not None else None
+
+
+def file_op_from_event(event_type: str) -> str:
+    """Return the op name for a ``file.*`` event type (e.g. ``file.created`` -> ``created``).
+
+    Mirrors the historical ``event_type.split(".", 1)[1]`` derivation for the registered
+    file events, falling back to that split for any not in ``FILE_OPS``.
+    """
+    op = _OP_BY_EVENT.get(event_type)
+    return op if op is not None else event_type.split(".", 1)[1]
+
+
+def file_action_type(op: str) -> str:
+    """Return the schema.org action type for a file-edit op (unknown ops -> UpdateAction)."""
+    spec = FILE_OPS.get(op)
+    return spec.action_type if spec is not None else "UpdateAction"
+
+
+# op -> action-type view, derived from FILE_OPS so the action builder reads the unified
+# vocabulary (the consumer keeps its own UpdateAction fallback for an unmapped op).
+FILE_OP_TYPE: dict[str, str] = {op: spec.action_type for op, spec in FILE_OPS.items()}
 
 # Tool basenames whose invocation is a deletion (drives DeleteAction classification).
 DELETE_TOOLS = {"rm", "rmdir", "del", "unlink"}
@@ -197,10 +255,16 @@ def root_creative_work(
 
 __all__ = [
     "DELETE_TOOLS",
+    "FILE_OPS",
     "FILE_OP_TYPE",
     "STEP_STATUS_URI",
+    "TOOL_FILE_OP",
+    "FileOp",
     "command_action_type",
     "ensure_software",
+    "file_action_type",
+    "file_event_for_tool",
+    "file_op_from_event",
     "fragment_id",
     "property_value",
     "ref",

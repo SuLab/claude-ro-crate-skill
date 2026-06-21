@@ -270,15 +270,23 @@ def redaction_categories(*results: RedactionResult) -> list[str]:
     return sorted(merged)
 
 
-def redaction_event_payload(context: str, *results: RedactionResult) -> dict[str, Any]:
+def redaction_event_payload(
+    context: str, *results: RedactionResult, extra_applied: int = 0
+) -> dict[str, Any]:
     """Build a ``redaction.applied`` event payload from one or more results.
 
     Sums the per-field redaction counts and merges their categories so a field
     redacted across multiple text streams (e.g. a note plus a rationale)
     reports every matched category, not just the first.
+
+    ``extra_applied`` folds in count-only redaction tallies (sidecar/stream
+    pumps) that know how many substitutions they made but not which categories
+    matched. It contributes to ``applied`` only, never to ``categories`` — the
+    count-only seam that lets callers add integer counts without fabricating a
+    category-less ``RedactionResult`` placeholder.
     """
     return {
         "context": context,
-        "applied": sum(result.applied for result in results),
+        "applied": sum(result.applied for result in results) + extra_applied,
         "categories": redaction_categories(*results),
     }

@@ -29,7 +29,15 @@ from ro_crate_run.constants import (
 from ro_crate_run.events import crate_actor_id
 from ro_crate_run.ids import IdMap, relative_file_id
 from ro_crate_run.journal import EventWriter
-from ro_crate_run.models import LastCheckpoint, RcrConfig, RunModel, strip_none
+from ro_crate_run.models import (
+    CommandRecord,
+    LastCheckpoint,
+    RcrConfig,
+    RcrEvent,
+    RunModel,
+    ValidationReport,
+    strip_none,
+)
 from ro_crate_run.state import load_config, load_state, read_events, write_state
 from ro_crate_run.validation.graphview import types_of
 from ro_crate_run.validation.validator import validate_run
@@ -38,6 +46,12 @@ from . import mapping
 from .files import FilePlan, log_should_copy, plan_file_inclusion
 from .mapping._helpers import fragment_id, property_value, ref, root_ref
 from .run_model import build_run_model
+
+# Well-known crate filenames, named so the protocol-significant strings live in one place
+# rather than being open-coded at each use site.
+METADATA_FILENAME = "ro-crate-metadata.json"
+JOURNAL_FILENAME = "events.ndjson"
+README_FILENAME = "README.md"
 
 
 def checkpoint(state_dir: Path, requested_profile: str = "auto", *, lock_timeout: float = 30.0) -> int:
@@ -50,14 +64,48 @@ def checkpoint(state_dir: Path, requested_profile: str = "auto", *, lock_timeout
 
 
 def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
-    from .profiles import enrich_with_adapter
+    """Thin sequence of the checkpoint phases under the held checkpoint.lock: persist the
+    requested profile, run a preview build to record the selection and detect drift-dirtiness,
+    then emit crate.checkpoint.started and run the guarded build/write/validate/bookkeeping
+    cycle (emitting crate.checkpoint.failed on any error)."""
+    _persist_requested_profile(state_dir, requested_profile)
+    _record_preview_and_drift(state_dir, requested_profile)
+    high_water = load_state(state_dir).sequence
+    writer = EventWriter(state_dir)
+    start_event = writer.append(
+        "crate.checkpoint.started",
+        {"materialized_through_sequence": high_water},
+        source_kind="materializer",
+    )
+    try:
+        _assert_journal_integrity(state_dir)
+        _build_and_write_crate(state_dir, high_water)
+        report = validate_run(state_dir, strict=False, public=False, append_event=False)
+        _record_checkpoint_completion(state_dir, writer, start_event, high_water, report)
+        return 0 if report.status != "failed" else 1
+    except Exception as exc:
+        writer.append("crate.checkpoint.failed", {"error": str(exc)}, source_kind="materializer")
+        raise
 
-    # If an explicit profile is requested, persist it to state first so
-    # build_run_model (which reads state.requested_profile) honours it.
-    if requested_profile != "auto":
-        _pre_state = load_state(state_dir)
-        _pre_state.requested_profile = requested_profile
-        write_state(state_dir, _pre_state)
+
+def _persist_requested_profile(state_dir: Path, requested_profile: str) -> None:
+    """Persist an explicit (non-auto) requested profile to state before the build, so
+    build_run_model (which reads state.requested_profile) honours it."""
+    if requested_profile == "auto":
+        return
+    pre_state = load_state(state_dir)
+    pre_state.requested_profile = requested_profile
+    write_state(state_dir, pre_state)
+
+
+def _record_preview_and_drift(state_dir: Path, requested_profile: str) -> None:
+    """Build a preview model to record the profile selection and mark the run dirty on drift.
+
+    The preview build (un-enriched model + adapter enrich) drives _record_profile_selection and
+    the drift check below; it runs before crate.checkpoint.started so the dirty flag and the
+    high-water sequence are settled before the real build cycle begins. Marks the run dirty when
+    the materializer version or the selected profile changed since the last checkpoint."""
+    from .profiles import enrich_with_adapter
 
     preview_state = load_state(state_dir)
     preview = build_run_model(state_dir, preview_state.sequence)
@@ -76,58 +124,65 @@ def _checkpoint_locked(state_dir: Path, requested_profile: str = "auto") -> int:
     if version_changed or profile_changed:
         state.dirty = True
         write_state(state_dir, state)
-    high_water = state.sequence
-    writer = EventWriter(state_dir)
-    start_event = writer.append(
-        "crate.checkpoint.started",
-        {"materialized_through_sequence": high_water},
+
+
+def _assert_journal_integrity(state_dir: Path) -> None:
+    """Validate journal syntax + hash chain BEFORE building the model, so a tampered/corrupt
+    journal is caught before it is processed or written."""
+    from ro_crate_run.validation.context import build_context
+    from ro_crate_run.validation.journal import check_journal
+
+    journal_findings = check_journal(build_context(state_dir, strict=False, public=False))
+    if journal_findings:
+        raise ValueError(
+            "journal integrity check failed: " + ", ".join(f.code for f in journal_findings)
+        )
+
+
+def _build_and_write_crate(state_dir: Path, high_water: int) -> None:
+    """Build the RunModel through the high-water sequence, write the crate, and persist the
+    resulting profile selection back to state."""
+    from .profiles import enrich_with_adapter
+
+    model = build_run_model(state_dir, high_water)
+    enrich_with_adapter(model, Path(state_dir).parent)
+    write_crate(state_dir, model, published_at=utc_now())
+    state = load_state(state_dir)
+    state.selected_profile = model.selected_profile
+    state.profile_uri = model.profile_uri
+    state.profile_confidence = model.profile_confidence or state.profile_confidence
+    write_state(state_dir, state)
+
+
+def _record_checkpoint_completion(
+    state_dir: Path,
+    writer: EventWriter,
+    start_event: RcrEvent,
+    high_water: int,
+    report: ValidationReport,
+) -> None:
+    """Emit crate.checkpoint.completed and record last_checkpoint bookkeeping; clear dirty
+    only on a non-failed report (dirty stays set when validation failed)."""
+    complete = writer.append(
+        "crate.checkpoint.completed",
+        {
+            "started_event_id": start_event.event_id,
+            "materialized_through_sequence": high_water,
+            "validation_status": report.status,
+        },
         source_kind="materializer",
     )
-    try:
-        # Validate journal syntax + hash chain BEFORE building the model, so a
-        # tampered/corrupt journal is caught before it is processed or written.
-        from ro_crate_run.validation.context import build_context
-        from ro_crate_run.validation.journal import check_journal
-
-        journal_findings = check_journal(build_context(state_dir, strict=False, public=False))
-        if journal_findings:
-            raise ValueError(
-                "journal integrity check failed: "
-                + ", ".join(f.code for f in journal_findings)
-            )
-        model = build_run_model(state_dir, high_water)
-        enrich_with_adapter(model, Path(state_dir).parent)
-        write_crate(state_dir, model, published_at=utc_now())
-        state = load_state(state_dir)
-        state.selected_profile = model.selected_profile
-        state.profile_uri = model.profile_uri
-        state.profile_confidence = model.profile_confidence or state.profile_confidence
-        write_state(state_dir, state)
-        report = validate_run(state_dir, strict=False, public=False, append_event=False)
-        complete = writer.append(
-            "crate.checkpoint.completed",
-            {
-                "started_event_id": start_event.event_id,
-                "materialized_through_sequence": high_water,
-                "validation_status": report.status,
-            },
-            source_kind="materializer",
-        )
-        state = load_state(state_dir)
-        state.last_checkpoint = LastCheckpoint(
-            event_id=complete.event_id,
-            timestamp=complete.timestamp,
-            event_sequence=complete.sequence,
-            materialized_through_sequence=high_water,
-            validation_status=report.status,
-            materializer_version=_rcr_version,
-        )
-        state.dirty = report.status == "failed"
-        write_state(state_dir, state)
-        return 0 if report.status != "failed" else 1
-    except Exception as exc:
-        writer.append("crate.checkpoint.failed", {"error": str(exc)}, source_kind="materializer")
-        raise
+    state = load_state(state_dir)
+    state.last_checkpoint = LastCheckpoint(
+        event_id=complete.event_id,
+        timestamp=complete.timestamp,
+        event_sequence=complete.sequence,
+        materialized_through_sequence=high_water,
+        validation_status=report.status,
+        materializer_version=_rcr_version,
+    )
+    state.dirty = report.status == "failed"
+    write_state(state_dir, state)
 
 
 @dataclass
@@ -217,7 +272,7 @@ def _emit_scaffold(ctx: _WriteCtx) -> None:
     model = ctx.model
     cfg = ctx.cfg
     descriptor = {
-        "@id": "ro-crate-metadata.json",
+        "@id": METADATA_FILENAME,
         "@type": "CreativeWork",
         "about": root_ref(),
         # Fixed at RO-Crate 1.2 (the descriptor MUST conform to exactly this; SPEC §15.2).
@@ -349,32 +404,36 @@ def _emit_parameters(ctx: _WriteCtx) -> None:
     }
 
 
+def _emit_planned_file(ctx: _WriteCtx, plan: FilePlan) -> None:
+    """Emit one FilePlan: build its File entity, link it from hasPart when included, copy its
+    body into the crate when policy copies, and record its id in the cross-section accumulator.
+
+    The single source for the FilePlan -> entity/hasPart/copy sequence shared by the declared-files
+    and per-command emitters; callers layer their own extra references (e.g. mentions) on top."""
+    fp_id = ctx.formal_param_map.get(str(plan.declared.get("path", plan.file_id)))
+    ctx.graph.append(mapping.build_file_entity(plan, ctx.max_hash_bytes, fp_id))
+    ctx.file_ids.add(plan.file_id)
+    if plan.included:
+        ctx.root["hasPart"].append(ref(plan.file_id))
+    if plan.copy:
+        _copy_into_crate(plan.abs_path, ctx.crate_dir / plan.file_id)
+
+
 def _emit_declared_files(ctx: _WriteCtx) -> None:
     """Emit File entities for declared inputs/outputs and copy included bodies into the crate.
 
     Included files are linked from hasPart; a declared input that policy does not copy is still
     referenced from mentions so the user's explicitly-declared input is never an orphan. Seeds
     the cross-section ctx.file_ids accumulator."""
-    graph = ctx.graph
-    root = ctx.root
-    crate_dir = ctx.crate_dir
-    max_hash_bytes = ctx.max_hash_bytes
     for plan in ctx.plans.values():
-        fp_id = ctx.formal_param_map.get(str(plan.declared.get("path", plan.file_id)))
-        entity = mapping.build_file_entity(plan, max_hash_bytes, fp_id)
-        graph.append(entity)
-        ctx.file_ids.add(plan.file_id)
-        if plan.included:
-            root["hasPart"].append(ref(plan.file_id))
-        elif plan.role == "input":
+        _emit_planned_file(ctx, plan)
+        if not plan.included and plan.role == "input":
             # A declared input that policy does NOT copy into the crate (e.g. an external /
             # by-reference dataset) must still be reachable from the root — otherwise the
             # user's explicitly-declared input is an orphan, silently absent from the crate's
             # navigable structure. Reference it via `mentions` (it is described, not a copied
             # data part).
-            root["mentions"].append(ref(plan.file_id))
-        if plan.copy:
-            _copy_into_crate(plan.abs_path, crate_dir / plan.file_id)
+            ctx.root["mentions"].append(ref(plan.file_id))
 
 
 def _emit_workflow(ctx: _WriteCtx) -> list[dict[str, Any]]:
@@ -394,7 +453,7 @@ def _emit_workflow(ctx: _WriteCtx) -> list[dict[str, Any]]:
         root["mainEntity"] = ref(wf_id)
         # A synthesized workflow is an abstract entity (the agent's actions), not a file,
         # so it is referenced via mainEntity only and is not part of the data payload.
-        synthetic_wf = bool(model.workflow and model.workflow.get("synthetic"))
+        synthetic_wf = _is_synthetic_workflow(model)
         if not synthetic_wf and ref(wf_id) not in root["hasPart"]:
             root["hasPart"].append(ref(wf_id))
 
@@ -446,10 +505,10 @@ def _emit_event_journal(ctx: _WriteCtx, state_dir: Path) -> None:
     """Embed the event journal as a File entity, gated on file_policy.include_event_journal."""
     if not ctx.cfg.file_policy.include_event_journal:
         return
-    journal_src = state_dir / "events.ndjson"
+    journal_src = state_dir / JOURNAL_FILENAME
     if not journal_src.exists():
         return
-    journal_rel = "events.ndjson"
+    journal_rel = JOURNAL_FILENAME
     _copy_into_crate(journal_src, ctx.crate_dir / journal_rel)
     journal_entity: dict[str, Any] = {
         "@id": journal_rel,
@@ -484,7 +543,7 @@ def _emit_readme(ctx: _WriteCtx) -> None:
     (an @id collision -> file_content_mismatch). An existing README.md already satisfies the
     SHOULD; the hasPart pass ensures it is linked."""
     graph = ctx.graph
-    readme_rel = "README.md"
+    readme_rel = README_FILENAME
     if readme_rel in {e.get("@id") for e in graph}:
         return
     _write_readme(ctx.crate_dir / readme_rel, ctx.model)
@@ -519,7 +578,7 @@ def _write_crate_files(ctx: _WriteCtx, model: RunModel) -> None:
     )
 
 
-def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
+def _emit_command_file_entities(ctx: _WriteCtx, command: CommandRecord) -> None:
     """Emit a single command's action + its sidecar/log/output/input File entities.
 
     Extends ctx.graph with the command's ProcessRun action and references it (plus its
@@ -533,7 +592,6 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
     crate_dir = ctx.crate_dir
     cfg = ctx.cfg
     plans = ctx.plans
-    formal_param_map = ctx.formal_param_map
     file_ids = ctx.file_ids
     max_hash_bytes = ctx.max_hash_bytes
 
@@ -554,12 +612,7 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
         if output_id not in file_ids:
             output_plan = plans.get(output_id)
             if output_plan is not None:
-                fp_id2 = formal_param_map.get(str(output_plan.declared.get("path", output_id)))
-                graph.append(mapping.build_file_entity(output_plan, max_hash_bytes, fp_id2))
-                if output_plan.included:
-                    root["hasPart"].append(ref(output_id))
-                if output_plan.copy:
-                    _copy_into_crate(output_plan.abs_path, crate_dir / output_id)
+                _emit_planned_file(ctx, output_plan)
             else:
                 # Fallback: emit a minimal File entity for undeclared outputs.
                 fallback = FilePlan(
@@ -569,7 +622,7 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
                 )
                 graph.append(mapping.build_file_entity(fallback, max_hash_bytes))
                 root["hasPart"].append(ref(output_id))
-            file_ids.add(output_id)
+                file_ids.add(output_id)
     # Ensure command inputs referenced as the action's `object` have File entities
     # even when not separately declared via `rcr input` (otherwise the object ref
     # would dangle). Inputs are not forced into hasPart — they are referenced only.
@@ -587,6 +640,14 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
         file_ids.add(input_id)
 
 
+def _is_synthetic_workflow(model: RunModel) -> bool:
+    """Whether the run's workflow was synthesized by rcr (no external definition file).
+
+    A synthesized workflow is the agent's own actions modelled as a workflow; it is abstract
+    (mainEntity only, never a data part) and is the source the synthetic-step weave draws on."""
+    return bool(model.workflow and model.workflow.get("synthetic"))
+
+
 def _weave_synthetic_workflow_steps(
     ctx: _WriteCtx, workflow_entities: list[dict[str, Any]]
 ) -> None:
@@ -597,7 +658,7 @@ def _weave_synthetic_workflow_steps(
     actions (commands + file edits + raw commands + subagent dispatches) in time order."""
     graph = ctx.graph
     model = ctx.model
-    if workflow_entities and model.workflow and model.workflow.get("synthetic") and not model.steps:
+    if workflow_entities and _is_synthetic_workflow(model) and not model.steps:
         command_action_ids = {c.action_id for c in model.commands}
         timeline = [
             e for e in graph
@@ -635,7 +696,7 @@ def _ensure_data_entities_in_haspart(graph: list[dict[str, Any]], root: dict[str
             continue
         if entity_id in present:
             continue
-        if entity_id.startswith("#") or entity_id in {ROOT_DATASET_ID, "ro-crate-metadata.json"}:
+        if entity_id.startswith("#") or entity_id in {ROOT_DATASET_ID, METADATA_FILENAME}:
             continue
         if is_web_id(entity_id):
             continue
@@ -814,7 +875,7 @@ def _write_metadata_with_rocrate(crate_dir: Path, data: dict[str, Any]) -> None:
         crate.add_or_update_jsonld(dict(entity))
     with tempfile.TemporaryDirectory(prefix="rocrate-py-", dir=crate_dir.parent) as tmp:
         crate.write(tmp)
-        shutil.copy2(Path(tmp) / "ro-crate-metadata.json", crate_dir / "ro-crate-metadata.json")
+        shutil.copy2(Path(tmp) / METADATA_FILENAME, crate_dir / METADATA_FILENAME)
 
 
 def _rocrate_compatible(value: Any, embedded_entities: dict[str, dict[str, Any]]) -> Any:

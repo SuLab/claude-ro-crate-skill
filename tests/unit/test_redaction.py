@@ -3,6 +3,7 @@ from pathlib import Path
 
 from ro_crate_run import commands
 from ro_crate_run.config import default_config
+from ro_crate_run.models import RedactionResult
 from ro_crate_run.redact import redact_run
 from ro_crate_run.redaction import Redactor, redaction_event_payload
 
@@ -14,6 +15,24 @@ def test_redaction_event_payload_omits_text() -> None:
     assert payload == {"context": "note", "applied": result.applied, "categories": list(result.categories)}
     assert "supersecretvalue123" not in json.dumps(payload)
     assert "text" not in payload
+
+
+def test_extra_applied_adds_count_only_total_without_categories() -> None:
+    # The count-only seam: an integer tally (e.g. sidecar/stream pumps) bumps
+    # `applied` but never `categories`, and yields the same payload the old
+    # category-less RedactionResult("", n, ()) placeholder produced.
+    r = Redactor.default()
+    result = r.redact_text("token API_KEY=supersecretvalue123")
+    seam = redaction_event_payload("note", result, extra_applied=2)
+    placeholder = redaction_event_payload("note", result, RedactionResult("", 2, ()))
+    assert seam == placeholder
+    assert seam["applied"] == result.applied + 2
+    assert seam["categories"] == list(result.categories)
+
+
+def test_extra_applied_alone_carries_no_categories() -> None:
+    payload = redaction_event_payload("execution.command", extra_applied=3)
+    assert payload == {"context": "execution.command", "applied": 3, "categories": []}
 
 
 def test_redact_run_uses_policy_file(tmp_path: Path, monkeypatch) -> None:

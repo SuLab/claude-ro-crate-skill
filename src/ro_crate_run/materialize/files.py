@@ -67,112 +67,133 @@ def _included_for_role(role: str, fp: FilePolicy) -> bool:
     return fp.include_declared_outputs
 
 
-def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> list[FilePlan]:
-    fp = cfg.file_policy
-    max_bytes = fp.max_file_bytes()
-    plans: dict[str, FilePlan] = {}
+def _merge_plan(old: Optional[FilePlan], new: FilePlan) -> FilePlan:
+    """Combine a freshly-considered plan with any prior plan for the same file_id.
 
-    def _merge(new: FilePlan) -> FilePlan:
-        """Combine a freshly-considered plan with any prior plan for the same file_id.
+    A path can be considered more than once (e.g. declared via `rcr output` AND produced
+    as a command output). When a path is both user-declared and inferred, the explicit
+    `rcr input/output` metadata (description/existence/role) wins in either arrival order,
+    so an explicitly described input is never overwritten by the inferred "Command output"
+    description. But copy/included are UNIONED so a genuinely-produced output's content is
+    still captured even when the user declared it by-reference (the default), and a
+    sensitive plan stays sensitive (never captured). Without the union a declared+produced
+    output silently loses its bytes, which would, e.g., defeat the public-export
+    secret-scan gate.
+    """
+    if old is None:
+        return new
+    if old.user_declared and not new.user_declared:
+        user, other = old, new
+    elif new.user_declared and not old.user_declared:
+        user, other = new, old
+    else:
+        user, other = new, old
+    sensitive = old.sensitive or new.sensitive
+    return FilePlan(
+        file_id=new.file_id,
+        abs_path=new.abs_path or old.abs_path,
+        declared={**other.declared, **user.declared},
+        copy=(old.copy or new.copy) and not sensitive,
+        included=old.included or new.included,
+        reason=new.reason if new.copy else old.reason,
+        sensitive=sensitive,
+        role=user.role or other.role,
+        user_declared=old.user_declared or new.user_declared,
+    )
 
-        A path can be considered more than once (e.g. declared via `rcr output` AND produced
-        as a command output). When a path is both user-declared and inferred, the explicit
-        `rcr input/output` metadata (description/existence/role) wins in either arrival order,
-        so an explicitly described input is never overwritten by the inferred "Command output"
-        description. But copy/included are UNIONED so a genuinely-produced output's content is
-        still captured even when the user declared it by-reference (the default), and a
-        sensitive plan stays sensitive (never captured). Without the union a declared+produced
-        output silently loses its bytes, which would, e.g., defeat the public-export
-        secret-scan gate.
-        """
-        old = plans.get(new.file_id)
-        if old is None:
-            return new
-        if old.user_declared and not new.user_declared:
-            user, other = old, new
-        elif new.user_declared and not old.user_declared:
-            user, other = new, old
-        else:
-            user, other = new, old
-        sensitive = old.sensitive or new.sensitive
+
+def _classify_copy(
+    resolved: Path, copy_policy: Optional[str], included: bool, max_bytes: int, copy_mode: str,
+) -> tuple[bool, str]:
+    """Decide copy-vs-reference for an in-root regular candidate, highest precedence first.
+
+    An explicit per-declaration "reference" always references; a non-regular or over-size
+    file can only be referenced; an explicit "copy" copies when the role is included;
+    otherwise the global copy_mode governs. The returned `reason` records which branch decided.
+    """
+    is_file = resolved.exists() and resolved.is_file()
+    size_ok = is_file and resolved.stat().st_size <= max_bytes
+    if copy_policy == "reference":
+        return False, "explicit-reference"
+    if not is_file:
+        return False, "not-a-regular-file"
+    if not size_ok:
+        return False, "larger-than-max-file-size"
+    if copy_policy == "copy":
+        return included, ("explicit-copy" if included else "not-included")
+    copy = included and copy_mode in {"copy", "mixed"}
+    return copy, ("policy-copy" if copy else "referenced")
+
+
+def _plan_for_path(
+    path_str: str, role: str, copy_policy: Optional[str], declared: dict[str, Any],
+    cfg: RcrConfig, project_dir: Path, max_bytes: int, *, user_declared: bool = False,
+) -> Optional[FilePlan]:
+    """Classify a single declared/produced path into a FilePlan.
+
+    Returns None when the path is empty or matches an ignore pattern (the path is dropped
+    entirely); otherwise an un-merged FilePlan for the caller to fold into the plan set.
+    """
+    if not path_str:
+        return None
+    raw = Path(path_str)
+    resolved = _safe_resolve(raw, project_dir)
+    if resolved is None:
+        file_id = raw.as_uri() if raw.is_absolute() else str(raw)
         return FilePlan(
-            file_id=new.file_id,
-            abs_path=new.abs_path or old.abs_path,
-            declared={**other.declared, **user.declared},
-            copy=(old.copy or new.copy) and not sensitive,
-            included=old.included or new.included,
-            reason=new.reason if new.copy else old.reason,
-            sensitive=sensitive,
-            role=user.role or other.role,
-            user_declared=old.user_declared or new.user_declared,
+            file_id=file_id,
+            abs_path=raw,
+            declared=declared,
+            copy=False,
+            included=False,
+            reason="outside-project-root",
+            role=role,
+            user_declared=user_declared,
         )
+    file_id = str(resolved.relative_to(project_dir.resolve()))
+    if _is_ignored(file_id, cfg.ignore_patterns):
+        return None
+    if _is_sensitive(file_id):
+        # Never read, hash, or copy — only a content-free reference is recorded.
+        return FilePlan(
+            file_id=file_id,
+            abs_path=resolved,
+            declared=declared,
+            copy=False,
+            included=False,
+            reason="sensitive-never-captured",
+            sensitive=True,
+            role=role,
+            user_declared=user_declared,
+        )
+    included = _included_for_role(role, cfg.file_policy)
+    copy, reason = _classify_copy(resolved, copy_policy, included, max_bytes, cfg.copy_mode)
+    return FilePlan(
+        file_id=file_id,
+        abs_path=resolved,
+        declared=declared,
+        copy=copy,
+        included=included,
+        reason=reason,
+        role=role,
+        user_declared=user_declared,
+    )
+
+
+def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> list[FilePlan]:
+    max_bytes = cfg.file_policy.max_file_bytes()
+    plans: dict[str, FilePlan] = {}
 
     def consider(
         path_str: str, role: str, copy_policy: Optional[str], declared: dict[str, Any],
         *, user_declared: bool = False,
     ) -> None:
-        if not path_str:
-            return
-        raw = Path(path_str)
-        resolved = _safe_resolve(raw, project_dir)
-        if resolved is None:
-            file_id = raw.as_uri() if raw.is_absolute() else str(raw)
-            plans[file_id] = _merge(FilePlan(
-                file_id=file_id,
-                abs_path=raw,
-                declared=declared,
-                copy=False,
-                included=False,
-                reason="outside-project-root",
-                role=role,
-                user_declared=user_declared,
-            ))
-            return
-        file_id = str(resolved.relative_to(project_dir.resolve()))
-        if _is_ignored(file_id, cfg.ignore_patterns):
-            return
-        if _is_sensitive(file_id):
-            # Never read, hash, or copy — only a content-free reference is recorded.
-            plans[file_id] = _merge(FilePlan(
-                file_id=file_id,
-                abs_path=resolved,
-                declared=declared,
-                copy=False,
-                included=False,
-                reason="sensitive-never-captured",
-                sensitive=True,
-                role=role,
-                user_declared=user_declared,
-            ))
-            return
-        included = _included_for_role(role, fp)
-        is_file = resolved.exists() and resolved.is_file()
-        size_ok = is_file and resolved.stat().st_size <= max_bytes
-        # Copy-vs-reference decision, highest precedence first: an explicit per-declaration
-        # "reference" always references; a non-regular or over-size file can only be
-        # referenced; an explicit "copy" copies when the role is included; otherwise the
-        # global copy_mode governs. `reason` records which branch decided.
-        if copy_policy == "reference":
-            copy, reason = False, "explicit-reference"
-        elif not is_file:
-            copy, reason = False, "not-a-regular-file"
-        elif not size_ok:
-            copy, reason = False, "larger-than-max-file-size"
-        elif copy_policy == "copy":
-            copy, reason = included, ("explicit-copy" if included else "not-included")
-        else:
-            copy = included and cfg.copy_mode in {"copy", "mixed"}
-            reason = "policy-copy" if copy else "referenced"
-        plans[file_id] = _merge(FilePlan(
-            file_id=file_id,
-            abs_path=resolved,
-            declared=declared,
-            copy=copy,
-            included=included,
-            reason=reason,
-            role=role,
+        plan = _plan_for_path(
+            path_str, role, copy_policy, declared, cfg, project_dir, max_bytes,
             user_declared=user_declared,
-        ))
+        )
+        if plan is not None:
+            plans[plan.file_id] = _merge_plan(plans.get(plan.file_id), plan)
 
     for item in model.inputs:
         consider(str(item.get("path", "")), "input", item.get("copy_policy"), dict(item),

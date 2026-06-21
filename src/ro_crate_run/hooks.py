@@ -565,9 +565,9 @@ def _enforced_block_reason(command: str, state: RcrState, cfg: RcrConfig) -> str
 
 
 def _file_event_for_tool(tool_name: str) -> str | None:
-    return {
-        "Write": "file.created",
-        "Edit": "file.modified",
-        "MultiEdit": "file.modified",
-        "NotebookEdit": "file.modified",
-    }.get(tool_name)
+    # Route through the single file-op vocabulary (mapping._helpers.FILE_OPS) so the
+    # tool->event mapping cannot drift from the reducer's event->op and the crate's
+    # op->action-type. Imported lazily to keep hooks free of a module-level mapping dep.
+    from .materialize.mapping._helpers import file_event_for_tool
+
+    return file_event_for_tool(tool_name)
