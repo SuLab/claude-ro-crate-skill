@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Fixed
+- `hash_large_files` is now honored everywhere: the runner's input/output snapshots
+  and `rcr input`/dirty-check digests called `max_file_size_mb * BYTES_PER_MB` inline
+  and ignored the flag; all hashing now routes through `HashPolicy.max_hash_bytes()`.
+- `rcr config <field> <value>` coerces the value to the field's declared type
+  (`list[str]` comma-split, int/bool validation) instead of storing a raw string.
+- `rcr export --out PATH` without `--zip` now produces the archive instead of being
+  a silent no-op.
+- `file_record` hashes a symlink that resolves to a regular file (was dropped as
+  `not_regular_file`); `rocrate_hook.py` fails loudly on a missing event argument
+  instead of fabricating a `SessionStart`.
 - Redaction now masks structured (dict) payloads by sensitive key name, not only
   by value pattern — closing a fail-open path that let `{"password": ...}` reach
   the immutable journal in cleartext.
@@ -20,6 +30,16 @@
   the optional `cryptography`/`pyshacl` extras.
 
 ### Changed
+- Second audit-driven cleanup pass (behavior- and byte-preserving): `time.py`
+  renamed to `clock.py` (no longer shadows stdlib `time`); new shared seams
+  `validation/_findings.level_finding`, `proc.run_capture`, `fs.atomic_write_text`,
+  `mapping/_helpers.software_application`/`ensure_software`, and a unified `FILE_OPS`
+  vocabulary; `constants` vocab constants (`LEVEL_*`, `EXISTENCE_*`+`is_observed`/
+  `is_absent`, `SUBAGENT_EVENT_TYPES`, `dirty_effect` `Literal`, `events.SourceKind`);
+  the two journal mutators share `_mirror_lines`/`_bump_state`; partially-adopted
+  helpers (`fragment_id`, `property_value`, `graphview` coercion) finished; dead
+  `scan_tree`/`extract_steps` removed; `_checkpoint_locked`/`plan_file_inclusion`
+  decomposed; comment-history narration swept.
 - Audit-driven architecture refactor (extensibility, modularity, DRY, clean code),
   behavior- and byte-preserving (golden crates unchanged):
   - Profile facts unified in a `ProfileSpec`/`PROFILES` registry; `RunModel`
