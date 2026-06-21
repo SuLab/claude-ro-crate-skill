@@ -51,6 +51,13 @@ def new_id_map() -> dict[str, Any]:
 
 
 def slugify(value: str) -> str:
+    """Normalise ``value`` into a stable, collision-free ``@id`` fragment.
+
+    Lowercases, collapses each run of characters outside ``[a-zA-Z0-9._-]`` into a
+    single ``-`` (``.`` and ``_`` are preserved), and trims leading/trailing ``-``.
+    An empty result falls back to the literal ``item`` so callers always get a
+    non-empty, well-formed fragment to embed in a crate ``@id``.
+    """
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip().lower()).strip("-")
     return slug or "item"
 
@@ -101,8 +108,12 @@ class IdMap:
             self.save()
         return str(mapping[step_id])
 
-    def software_entity_id(self, name: str) -> str:
-        """Return the cached ``#software/<slug>`` id for software, persisting on first use."""
+    def software_id(self, name: str) -> str:
+        """Return the cached ``#software/<slug>`` id for software, persisting on first use.
+
+        Named to match the ``entity_for_*`` accessors and to avoid shadowing the
+        module-level :func:`software_entity_id` free function it delegates to.
+        """
         mapping = self.data.setdefault("software_to_entity", {})
         if name not in mapping:
             mapping[name] = software_entity_id(name)

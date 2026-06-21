@@ -5,12 +5,14 @@ vocabulary, and command start/terminal pairing for the append-only journal."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
-from ro_crate_run.constants import COMMAND_TERMINAL_EVENTS, EVENT_TYPES
+from ro_crate_run.constants import COMMAND_TERMINAL_EVENTS, EVENT_TYPES, LEVEL_JOURNAL
 from ro_crate_run.events import compute_event_hash
 from ro_crate_run.models import ValidationFinding
 
+from ._findings import level_finding
 from .context import ValidationContext
 
 _REQUIRED_FIELDS = (
@@ -19,11 +21,8 @@ _REQUIRED_FIELDS = (
     "previous_event_hash", "event_hash", "payload",
 )
 
-
-def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
-    """Construct an L0 (``journal``) finding; the level is bound here so it is not
-    repeated on every emission in this checker (every L0 finding is an error)."""
-    return ValidationFinding("journal", code, message, path)
+# L0 (journal) findings are always errors; the level is bound once here.
+_finding = partial(level_finding, LEVEL_JOURNAL)
 
 
 def _valid_timestamp(value: Any) -> bool:
@@ -47,27 +46,32 @@ def check_journal(ctx: ValidationContext) -> list[ValidationFinding]:
     started: dict[str, dict[str, Any]] = {}
     terminated: set[str] = set()
     for idx, event in enumerate(ctx.events, start=1):
+        # Locate every in-loop finding at the offending event so a single break in a
+        # long journal is traceable: prefer its event_id, falling back to the 1-based
+        # position when the id itself is the missing/invalid field.
+        at = str(event.get("event_id") or f"sequence:{idx}")
         for key in _REQUIRED_FIELDS:
             if key not in event:
-                findings.append(_finding("missing_event_field", f"Event missing {key}"))
+                findings.append(_finding("missing_event_field", f"Event missing {key}", at))
         if event.get("sequence") != idx:
-            findings.append(_finding("sequence_gap", "Event sequence is not monotonic"))
+            findings.append(_finding("sequence_gap", "Event sequence is not monotonic", at))
         if event.get("event_id") in seen:
-            findings.append(_finding("duplicate_event_id", "Duplicate event id"))
+            findings.append(_finding("duplicate_event_id", "Duplicate event id", at))
         seen.add(str(event.get("event_id")))
         if not _valid_timestamp(event.get("timestamp")):
-            findings.append(_finding("invalid_timestamp", "Event timestamp is not valid ISO-8601 UTC"))
+            findings.append(_finding("invalid_timestamp", "Event timestamp is not valid ISO-8601 UTC", at))
         if not isinstance(event.get("redacted"), bool):
-            findings.append(_finding("invalid_redaction_marker", "Event 'redacted' marker is not boolean"))
+            findings.append(_finding("invalid_redaction_marker", "Event 'redacted' marker is not boolean", at))
         if event.get("event_type") not in EVENT_TYPES:
             findings.append(_finding(
                 "unknown_event_type",
                 f"Event type {event.get('event_type')!r} is not in the registered vocabulary",
+                at,
             ))
         if event.get("previous_event_hash") != previous:
-            findings.append(_finding("hash_chain_mismatch", "Previous hash mismatch"))
+            findings.append(_finding("hash_chain_mismatch", "Previous hash mismatch", at))
         if event.get("event_hash") != compute_event_hash(event):
-            findings.append(_finding("event_hash_mismatch", "Event hash mismatch"))
+            findings.append(_finding("event_hash_mismatch", "Event hash mismatch", at))
         previous = event.get("event_hash")
         payload = event.get("payload", {})
         if event.get("event_type") == "execution.command.started" and isinstance(payload, dict):

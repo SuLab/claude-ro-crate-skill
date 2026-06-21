@@ -10,21 +10,21 @@ public export ships nothing until the crate is clean.
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from ..constants import BYTES_PER_MB
-from ..models import PrivacyFinding, ValidationFinding
-from ..redaction import Redactor, scan_file_for_secrets
-from ..state import read_events_safe
+from ro_crate_run.constants import BYTES_PER_MB, LEVEL_PRIVACY
+from ro_crate_run.models import PrivacyFinding, ValidationFinding
+from ro_crate_run.redaction import Redactor, iter_regular_files, scan_file_for_secrets
+from ro_crate_run.state import read_events_safe
+
+from ._findings import level_finding
 from .context import ValidationContext
 
-
-def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
-    """Construct an L5 (``privacy``) finding; the level is bound here so it is not
-    repeated on every emission. Every privacy finding is an error — the export
-    gate fails closed — so the default ``severity`` applies."""
-    return ValidationFinding("privacy", code, message, path)
+# Every L5 (privacy) finding is an error — the export gate fails closed — so the
+# default severity applies; the level is bound once here.
+_finding = partial(level_finding, LEVEL_PRIVACY)
 
 
 def check_public_export_payload(
@@ -64,9 +64,7 @@ def _scan(
 
 def scan_crate_secrets(crate_dir: Path, redactor: Redactor) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
-    for path in sorted(crate_dir.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in iter_regular_files(crate_dir):
         # An ASCII secret can hide inside an otherwise-binary blob; the shared
         # scanner decodes losslessly as latin-1 and skips only files that cannot
         # be read at all, so a non-UTF-8 file never makes the gate fail open.
@@ -120,9 +118,7 @@ def source_diff_findings(
 ) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     roots = [root.rstrip("/") for root in source_roots]
-    for path in sorted(crate_dir.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in iter_regular_files(crate_dir):
         rel = path.relative_to(crate_dir).as_posix()
         name = path.name
         is_diff = name.endswith((".diff", ".patch")) or "git-diff" in name

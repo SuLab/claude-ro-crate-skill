@@ -53,6 +53,11 @@ class ProjectContext:
 
 
 def _discover_project(cwd: Path) -> Path:
+    """Resolve the project root: the git top-level, then the nearest ``.git`` ancestor.
+
+    Falls back to ``cwd`` itself when neither is found so a non-git directory still
+    has a stable state-dir anchor.
+    """
     top = git_toplevel(cwd)
     if top:
         return Path(top).resolve()
@@ -63,6 +68,11 @@ def _discover_project(cwd: Path) -> Path:
 
 
 def _discover_plugin_root(cwd: Path) -> Path | None:
+    """Return the nearest ancestor holding ``.claude-plugin/plugin.json``, else ``None``.
+
+    That marker file is the load-bearing signal that an ancestor is a plugin root;
+    ``None`` means this tree is a plain project, not a plugin checkout.
+    """
     for path in [cwd, *cwd.parents]:
         if (path / ".claude-plugin" / "plugin.json").exists():
             return path

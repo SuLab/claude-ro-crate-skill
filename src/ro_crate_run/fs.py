@@ -26,9 +26,20 @@ def prefixed_sha256(value: str) -> str:
     return _SHA256_PREFIX + bare_sha256(value)
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path atomically via a temp sibling + os-level rename.
+
+    Mirrors state.write_state: a partially written or interrupted write never leaves a
+    truncated file at the destination, since the rename only publishes a complete temp file.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
 def write_json(path: Path, obj: Any) -> None:
     """Write obj as canonical pretty JSON (2-space indent, sorted keys, trailing newline)."""
-    path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
 
 def sha256_file(path: Path) -> str:
@@ -48,6 +59,8 @@ def file_record(path: Path, project_root: Path, max_hash_bytes: int) -> dict[str
       - relative_path (str | None): path relative to project_root, or None if outside it.
       - exists (bool): whether the path exists.
       - kind (str): one of 'directory', 'symlink', 'file', or 'missing' (when exists is False).
+        A symlink is classified 'symlink' regardless of what it points at; only a real
+        (non-symlink) directory/file gets 'directory'/'file'.
       - hash_status (str): one of 'missing', 'hashed', or 'skipped'.
       - hash_skip_reason (str): present only when hash_status == 'skipped'; one of
         'larger_than_policy' (file exceeds max_hash_bytes) or 'not_regular_file'.
@@ -56,7 +69,8 @@ def file_record(path: Path, project_root: Path, max_hash_bytes: int) -> dict[str
         when the path exists.
       - encoding_format (str): guessed MIME type, defaulting to 'application/octet-stream';
         present only when the path exists.
-      - sha256 (str): 'sha256:'-prefixed digest; present only when a regular file was hashed.
+      - sha256 (str): 'sha256:'-prefixed digest; present when a regular file -- including a
+        symlink resolving to one -- was hashed under the size gate.
     """
     path = Path(path)
     exists = path.exists()
@@ -73,7 +87,14 @@ def file_record(path: Path, project_root: Path, max_hash_bytes: int) -> dict[str
             "kind": "missing",
             "hash_status": "missing",
         }
-    kind = "directory" if path.is_dir() else "symlink" if path.is_symlink() else "file"
+    # Classify on the unresolved path: is_symlink() must precede is_dir()/is_file(), which both
+    # follow symlinks and would otherwise mask a symlink as its target's kind.
+    if path.is_symlink():
+        kind = "symlink"
+    elif path.is_dir():
+        kind = "directory"
+    else:
+        kind = "file"
     stat = path.stat()
     mime, _ = mimetypes.guess_type(str(path))
     record: dict[str, object] = {
@@ -85,10 +106,13 @@ def file_record(path: Path, project_root: Path, max_hash_bytes: int) -> dict[str
         "date_modified": clock.iso_utc_from_timestamp(stat.st_mtime),
         "encoding_format": mime or "application/octet-stream",
     }
-    if kind == "file" and stat.st_size <= max_hash_bytes:
+    # A symlink resolving to a regular file is hashable evidence; resolve it (stat already
+    # followed the link) so its content hash is captured rather than dropped as not_regular_file.
+    hashable = kind == "file" or (kind == "symlink" and resolved.is_file())
+    if hashable and stat.st_size <= max_hash_bytes:
         record["sha256"] = sha256_file(path)
         record["hash_status"] = "hashed"
-    elif kind == "file":
+    elif hashable:
         record["hash_status"] = "skipped"
         record["hash_skip_reason"] = "larger_than_policy"
     else:

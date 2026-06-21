@@ -15,7 +15,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from . import __version__
 from .clock import utc_now
@@ -37,15 +37,39 @@ ACTOR_TYPES: dict[str, str] = {
     "ci": "System",
 }
 
+# Closed set of valid source_kind values, mirrored as a typing alias so a
+# divergent literal (e.g. "human-cli") is a static type error instead of
+# silently falling through to _DEFAULT_ROLE.
+SourceKind = Literal[
+    "human_cli",
+    "claude_hook",
+    "skill_command",
+    "materializer",
+    "validator",
+    "ci",
+]
+
+# The event source_kind vocabulary: who authored a write. This is the single
+# discriminator that maps an event to its actor role (and thus to a Person /
+# SoftwareApplication / System). The string values are part of the on-disk
+# event source.kind field, so they are byte-frozen. Annotated as SourceKind so
+# they narrow when used as _ROLE_BY_SOURCE keys.
+SOURCE_HUMAN_CLI: SourceKind = "human_cli"
+SOURCE_CLAUDE_HOOK: SourceKind = "claude_hook"
+SOURCE_SKILL_COMMAND: SourceKind = "skill_command"
+SOURCE_MATERIALIZER: SourceKind = "materializer"
+SOURCE_VALIDATOR: SourceKind = "validator"
+SOURCE_CI: SourceKind = "ci"
+
 # Map an event source_kind to the actor role it acts as. Unknown sources fall
 # back to the rcr (tooling) role.
-_ROLE_BY_SOURCE: dict[str, str] = {
-    "human_cli": "human",
-    "claude_hook": "claude-code",
-    "skill_command": "rcr",
-    "materializer": "rcr",
-    "validator": "rcr",
-    "ci": "ci",
+_ROLE_BY_SOURCE: dict[SourceKind, str] = {
+    SOURCE_HUMAN_CLI: "human",
+    SOURCE_CLAUDE_HOOK: "claude-code",
+    SOURCE_SKILL_COMMAND: "rcr",
+    SOURCE_MATERIALIZER: "rcr",
+    SOURCE_VALIDATOR: "rcr",
+    SOURCE_CI: "ci",
 }
 _DEFAULT_ROLE = "rcr"
 
@@ -65,7 +89,7 @@ def engine_actor_id(engine: str) -> str:
     return f"#actor/engine/{engine}"
 
 
-def actor_for_source(source_kind: str) -> Actor:
+def actor_for_source(source_kind: SourceKind) -> Actor:
     """Return the event-level Actor for a source_kind, derived from the roster.
 
     Unknown source kinds fall back to the rcr (tooling) role.
@@ -118,6 +142,13 @@ def dump_event_line(data: dict[str, Any]) -> str:
 
 
 def compute_event_hash(event: dict[str, Any]) -> str:
+    """Compute the ``sha256:`` event hash over the canonical JSON of the event
+    with ``event_hash`` excluded.
+
+    The event's own ``event_hash`` is dropped before hashing so the chain link
+    covers every field except itself; the input is encoded via ``canonical_json``
+    so the writer and validator hash identical bytes.
+    """
     data = dict(event)
     data.pop("event_hash", None)
     return "sha256:" + hashlib.sha256(canonical_json(data).encode("utf-8")).hexdigest()
@@ -130,7 +161,7 @@ def new_event(
     run_id: str = "run_pending",
     sequence: int = 0,
     previous_event_hash: str | None = None,
-    source_kind: str = "skill_command",
+    source_kind: SourceKind = "skill_command",
     source_name: str = "rcr",
     visibility: str = "private",
     phase_id: str | None = None,
@@ -143,6 +174,15 @@ def new_event(
     timestamp: str | None = None,
     actor: Actor | None = None,
 ) -> RcrEvent:
+    """Construct an RcrEvent with defaults, rejecting JSON null in the payload.
+
+    Mints a fresh ``event_id``, stamps the schema version and a UTC timestamp
+    when none is given, and derives the actor from ``source_kind`` unless an
+    explicit ``actor`` is supplied. ``event_hash``/``previous_event_hash`` are
+    left for EventWriter.append to fill when the event joins the chain. A JSON
+    null anywhere in ``payload`` raises ValueError (absent fields must be
+    omitted, never encoded as null).
+    """
     _reject_null(payload)
     actor = actor or actor_for_source(source_kind)
     return RcrEvent(

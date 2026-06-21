@@ -17,7 +17,7 @@ from .clock import utc_now, utc_now_compact
 from .events import dump_event_line, event_from_dict, event_to_dict
 from .journal import EventWriter
 from .models import RcrEvent
-from .redaction import Redactor, iter_regular_files, scan_file_for_secrets
+from .redaction import Redactor, iter_regular_files, read_text_lossless, scan_file_for_secrets
 from .state import read_events
 
 
@@ -48,27 +48,40 @@ def redact_run(state_dir: Path, *, apply: bool = False, policy: Path | str | Non
         return 0
     if not apply:
         return 1
+    # One writer for the redaction.applied/failed appends: append() takes the
+    # append lock internally, so a single instance keeps the single-journal intent
+    # explicit without changing lock semantics.
+    writer = EventWriter(state_dir)
     try:
         _redact_event_journal(state_dir, redactor)
         _redact_text_files(state_dir, redactor)
     except Exception as exc:
-        EventWriter(state_dir).append(
+        writer.append(
             "redaction.failed",
             {"error": str(exc), "finding_count": len(findings)},
             source_kind="materializer",
             redacted=True,
         )
         raise
-    EventWriter(state_dir).append(
+    writer.append(
         "redaction.applied",
         {
             "finding_count": len(findings),
-            "redacted_journal": ".ro-crate-run/reports/redacted-events.ndjson",
+            "redacted_journal": _display_path(state_dir, _redacted_journal_report(state_dir)),
         },
         source_kind="materializer",
         redacted=True,
     )
     return 0
+
+
+def _redacted_journal_report(state_dir: Path) -> Path:
+    """Path to the re-linked redacted journal mirrored under ``reports/``.
+
+    Single source for both the on-disk write and the advertised
+    ``redacted_journal`` field so the two cannot drift apart.
+    """
+    return state_dir / "reports" / "redacted-events.ndjson"
 
 
 def _scan_files(state_dir: Path, redactor: Redactor) -> list[dict[str, str]]:
@@ -87,11 +100,8 @@ def _redact_text_files(state_dir: Path, redactor: Redactor) -> None:
             continue
         if not path.exists() or not path.is_file():
             continue
-        # Read losslessly as latin-1 (matching the shared scan policy) so a
-        # non-UTF-8 file carrying an ASCII secret is rewritten rather than skipped.
-        try:
-            text = path.read_bytes().decode("latin-1")
-        except OSError:
+        text = read_text_lossless(path)
+        if text is None:
             continue
         result = redactor.redact_text(text)
         if result.applied:
@@ -123,12 +133,11 @@ def _redact_event_journal(state_dir: Path, redactor: Redactor) -> None:
         # stored events always carry one, but never persist a null.
         redacted["timestamp"] = redacted.get("timestamp") or utc_now()
         events.append(event_from_dict(redacted))
-    # rewrite_chain re-links previous/event hashes in place under the append lock,
-    # atomically rewrites the journal, and bumps derived state (dirty stays True
-    # because the chain's final event maps to dirty_effect "set").
+    # dirty stays True after the rewrite: the chain's final event maps to
+    # dirty_effect "set", so a redaction does not clear the pending-checkpoint flag.
     EventWriter(state_dir).rewrite_chain(events)
     # Mirror the now-re-linked chain into the reports dir for inspection.
-    report_path = state_dir / "reports" / "redacted-events.ndjson"
+    report_path = _redacted_journal_report(state_dir)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(
         "".join(dump_event_line(event_to_dict(event)) for event in events),

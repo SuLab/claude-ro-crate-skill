@@ -1,3 +1,9 @@
+"""The single home for the project's UTC timestamp formatting (ISO-8601 with a 'Z' suffix).
+
+These formats are load-bearing: utc_now's microsecond/Z form is what the hash chain stores in
+events, and iso_utc_from_timestamp renders file-record mtimes for crate file entities.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

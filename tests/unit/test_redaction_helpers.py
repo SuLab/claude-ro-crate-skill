@@ -6,9 +6,9 @@ from pathlib import Path
 from ro_crate_run.config import default_config
 from ro_crate_run.redaction import (
     Redactor,
+    iter_regular_files,
     redaction_categories,
     scan_file_for_secrets,
-    scan_tree,
 )
 
 
@@ -28,13 +28,17 @@ def test_scan_file_for_secrets_skips_only_unreadable(tmp_path: Path) -> None:
     assert scan_file_for_secrets(missing, Redactor.default()) == []
 
 
-def test_scan_tree_returns_per_file_categories(tmp_path: Path) -> None:
+def test_tree_walk_scan_returns_per_file_categories(tmp_path: Path) -> None:
     (tmp_path / "clean.txt").write_text("nothing here")
     (tmp_path / "leak.txt").write_text("token API_KEY=supersecretvalue1234567")
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "key.txt").write_text("A" + "KIA" + "1234567890ABCDEF")
-    hits = scan_tree(tmp_path, Redactor.default())
-    found = {path.name: cats for path, cats in hits}
+    redactor = Redactor.default()
+    found = {
+        path.name: cats
+        for path in iter_regular_files(tmp_path)
+        if (cats := scan_file_for_secrets(path, redactor))
+    }
     assert "clean.txt" not in found
     assert found["leak.txt"] == ["secret-assignment"]
     assert found["key.txt"] == ["aws-key"]

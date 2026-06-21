@@ -50,7 +50,7 @@ def _recover_state_locked(state_dir: Path, active_run: bool = False) -> Recovery
     if repair_errors:
         result.fatal = True
         result.errors.extend(repair_errors)
-        _emit_repair_failed(state_dir, repair_errors[0])
+        _emit_repair(state_dir, "journal.repair.failed", repair_errors[0])
         return result
     parsed = [event_from_dict(item) for item in raw_events]
     result.events = list(parsed)
@@ -58,14 +58,14 @@ def _recover_state_locked(state_dir: Path, active_run: bool = False) -> Recovery
     if chain_error is not None:
         result.fatal = True
         result.errors.append(chain_error)
-        _emit_repair_failed(state_dir, chain_error)
+        _emit_repair(state_dir, "journal.repair.failed", chain_error)
         return result
 
     state = load_state(state_dir)
     if parsed and (
         state.sequence != parsed[-1].sequence or state.last_event_hash != parsed[-1].event_hash
     ):
-        _emit_repair_started(state_dir, "state_lagged_journal")
+        _emit_repair(state_dir, "journal.repair.started", "state_lagged_journal")
         state.sequence = parsed[-1].sequence
         state.last_event_hash = parsed[-1].event_hash
         write_state(state_dir, state)
@@ -80,7 +80,7 @@ def _recover_state_locked(state_dir: Path, active_run: bool = False) -> Recovery
         result.events.append(completed)
 
     if repaired_partial:
-        _emit_repair_started(state_dir, "partial_trailing_line_removed")
+        _emit_repair(state_dir, "journal.repair.started", "partial_trailing_line_removed")
         completed = EventWriter(state_dir).append(
             "journal.repair.completed",
             {"reason": "partial_trailing_line_removed"},
@@ -102,7 +102,7 @@ def _recover_state_locked(state_dir: Path, active_run: bool = False) -> Recovery
                 event.event_type == "execution.command.started"
                 and event.payload.get("command_id") not in terminal_ids
             ):
-                _emit_repair_started(state_dir, "abandoned_command")
+                _emit_repair(state_dir, "journal.repair.started", "abandoned_command")
                 blocked = writer.append(
                     "execution.command.blocked",
                     {
@@ -126,22 +126,13 @@ def ensure_recovered(state_dir: Path) -> None:
     recover_state(state_dir, active_run=False)
 
 
-def _emit_repair_started(state_dir: Path, reason: str) -> None:
+def _emit_repair(state_dir: Path, event_type: str, reason: str) -> None:
+    # Single best-effort emitter for the started/failed repair markers (the only difference
+    # was the event-type literal); the completed markers stay inline because they capture
+    # the appended event into result.events rather than swallowing it.
     try:
         EventWriter(state_dir).append(
-            "journal.repair.started",
-            {"reason": reason},
-            source_kind="materializer",
-            hold_lock=False,
-        )
-    except Exception:  # broad by design: repair helper must not raise
-        pass
-
-
-def _emit_repair_failed(state_dir: Path, reason: str) -> None:
-    try:
-        EventWriter(state_dir).append(
-            "journal.repair.failed",
+            event_type,
             {"reason": reason},
             source_kind="materializer",
             hold_lock=False,

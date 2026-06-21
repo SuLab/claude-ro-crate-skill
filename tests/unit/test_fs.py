@@ -35,6 +35,20 @@ def test_symlink_outside_root_resolves_out_of_root(tmp_path: Path) -> None:
     assert _safe_resolve(Path("link.txt"), tmp_path) is None
 
 
+def test_symlink_to_regular_file_is_hashed(tmp_path: Path) -> None:
+    # A symlink resolving to a regular file under the size gate must be hashed, not dropped as
+    # not_regular_file: is_symlink() is now tested before is_dir(), and the resolved target's
+    # content hash is captured for reproducibility evidence.
+    target = tmp_path / "data.txt"
+    target.write_text("hello\n")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+    record = file_record(link, project_root=tmp_path, max_hash_bytes=1024)
+    assert record["kind"] == "symlink"
+    assert record["hash_status"] == "hashed"
+    assert record["sha256"] == sha256_file(target)
+
+
 def test_capture_diff_returns_none_outside_repo(tmp_path: Path) -> None:
     from ro_crate_run.git import capture_diff
 

@@ -1,9 +1,10 @@
 """Cross-domain helpers shared by the mapping builders.
 
 Small utilities and shared vocabulary that several entity-builder submodules depend on:
-reference/PropertyValue node constructors, the crate-internal fragment-id scheme, the
-sha256 identifier shape, null-stripping, on-disk content sizing, the schema.org command
-action-type classifier, and the Bioschemas FormalParameter profile contextual entity.
+reference / PropertyValue / SoftwareApplication node constructors, the crate-internal
+fragment-id scheme, the sha256 identifier shape, null-stripping, on-disk content sizing, the
+schema.org command action-type classifier, and the Bioschemas FormalParameter profile
+contextual entity.
 
 The verb/op/status classification tables (`FILE_OP_TYPE`, `DELETE_TOOLS`, `STEP_STATUS_URI`)
 live here so every observed-thing → schema.org-class/status-URI mapping is discoverable and
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ro_crate_run import constants
+from ro_crate_run.ids import software_entity_id
 from ro_crate_run.models import CommandRecord, strip_none
 
 
@@ -30,30 +32,69 @@ def root_ref() -> dict[str, str]:
 
 
 def property_value(
-    name: str, value: str, *, property_id: str | None = None
+    name: str | None,
+    value: str,
+    *,
+    property_id: str | None = None,
+    description: str | None = None,
 ) -> dict[str, Any]:
-    """Return a schema.org ``PropertyValue`` node with ``name``/``value`` and optional ``propertyID``.
+    """Return a schema.org ``PropertyValue`` node carrying ``value`` and optional metadata.
 
-    ``propertyID`` is omitted (rather than emitted as null) when not supplied, matching the
-    shape the git/environment builders open-code.
+    Models both flavours of PropertyValue used across the crate: a named property
+    (``name`` then ``value``, with ``propertyID`` last) and a status-style property keyed only
+    by ``propertyID`` ahead of ``value`` (pass ``name=None``). Each optional field is omitted
+    rather than emitted as null. The two flavours order their keys differently, matching the
+    hand-written shapes each replaces byte-for-byte: a named node reads ``@type``, ``name``,
+    ``value``, ``propertyID``; a name-less node reads ``@type``, ``propertyID``, ``value``.
+    ``description`` is appended last in either case.
     """
-    node: dict[str, Any] = {"@type": "PropertyValue", "name": name, "value": value}
-    if property_id is not None:
-        node["propertyID"] = property_id
+    node: dict[str, Any] = {"@type": "PropertyValue"}
+    if name is not None:
+        node["name"] = name
+        node["value"] = value
+        if property_id is not None:
+            node["propertyID"] = property_id
+    else:
+        if property_id is not None:
+            node["propertyID"] = property_id
+        node["value"] = value
+    if description is not None:
+        node["description"] = description
     return node
 
 
 def sha256_identifier(raw: str) -> dict[str, Any]:
     """Return the sha256 ``PropertyValue`` identifier node for a digest.
 
-    Strips a leading ``sha256:`` prefix so the value carries the bare hex digest, matching the
-    identifier shape open-coded in the file/dependency builders.
+    Strips a leading ``sha256:`` prefix so the value carries the bare hex digest.
     """
     return {
         "@type": "PropertyValue",
         "propertyID": "sha256",
         "value": str(raw).replace("sha256:", ""),
     }
+
+
+def software_application(name: str) -> dict[str, Any]:
+    """Return a ``SoftwareApplication`` node identified by the tool/command ``name``.
+
+    The minimal shape (``@id``/``@type``/``name``) for a tool an action references as its
+    instrument; the ``@id`` is derived from ``name`` via the shared id scheme.
+    """
+    return {"@id": software_entity_id(name), "@type": "SoftwareApplication", "name": name}
+
+
+def ensure_software(name: str, seen: set[str], entities: list[dict[str, Any]]) -> str:
+    """Return the ``SoftwareApplication`` @id for ``name``, emitting the node once.
+
+    Dedupes by @id: appends the node to ``entities`` and records it in ``seen`` only the first
+    time a given tool is encountered, so repeated references reuse the existing entity.
+    """
+    sid = software_entity_id(name)
+    if sid not in seen:
+        seen.add(sid)
+        entities.append(software_application(name))
+    return sid
 
 
 def fragment_id(prefix: str, suffix: object) -> str:
@@ -151,20 +192,21 @@ def root_creative_work(
     return entity
 
 
-# ``strip_none`` (recursive, owned by models) is the single canonical null-stripper used by
-# the mapping builders; re-exported here so callers import it from one place. Mapping entities
-# never carry nested ``None``, so the recursive strip is byte-identical to a shallow one.
+# ``strip_none`` (recursive, owned by models) is the canonical null-stripper for the mapping
+# builders, exposed here so they import it alongside the entity constructors from one place.
 
 __all__ = [
     "DELETE_TOOLS",
     "FILE_OP_TYPE",
     "STEP_STATUS_URI",
     "command_action_type",
+    "ensure_software",
     "fragment_id",
     "property_value",
     "ref",
     "root_creative_work",
     "root_ref",
     "sha256_identifier",
+    "software_application",
     "strip_none",
 ]

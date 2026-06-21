@@ -5,20 +5,20 @@ in ``_required``."""
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
-from ro_crate_run.constants import DEPENDENCY_MANIFESTS
+from ro_crate_run.constants import DEPENDENCY_MANIFESTS, LEVEL_REPRODUCIBILITY, is_observed
 from ro_crate_run.models import ValidationFinding
 
+from ._findings import level_finding
 from .context import ValidationContext
 from .graphview import as_list, is_action
 
-
-def _warning(code: str, message: str, path: str = "") -> ValidationFinding:
-    """Construct an unconditional L4 (``reproducibility``) warning. Severity is
-    stated here so the level/severity pair lives in one place for this checker;
-    policy-escalated findings go through the local ``warn`` closure instead."""
-    return ValidationFinding("reproducibility", code, message, path, severity="warning")
+# Unconditional L4 (reproducibility) warnings: both the level and the warning
+# severity are bound once here. Policy-escalated findings (an error when required)
+# go through the local ``warn`` closure instead.
+_warning = partial(level_finding, LEVEL_REPRODUCIBILITY, severity="warning")
 
 
 def _env_observed(ctx: ValidationContext) -> dict[str, Any]:
@@ -37,16 +37,17 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
     vcfg = ctx.cfg.validation
 
     def warn(code: str, message: str, *, required: bool) -> None:
-        # Severity is stated directly: a policy-required gap is an error, otherwise a
-        # warning. The ``_required`` suffix is retained only as a stable machine code
-        # (the recommendations lookup strips it to reuse the base recommendation).
+        # A policy-required gap is an error, otherwise a warning. The ``_required``
+        # suffix is retained only as a stable machine code (the recommendations lookup
+        # strips it to reuse the base recommendation).
         if required:
-            findings.append(ValidationFinding(
-                "reproducibility", f"{code}_required", f"{message} (required by policy)", severity="error",
+            findings.append(level_finding(
+                LEVEL_REPRODUCIBILITY, f"{code}_required", f"{message} (required by policy)",
+                severity="error",
             ))
         else:
-            findings.append(ValidationFinding(
-                "reproducibility", code, message, severity="warning",
+            findings.append(level_finding(
+                LEVEL_REPRODUCIBILITY, code, message, severity="warning",
             ))
 
     # Missing git commit
@@ -65,7 +66,7 @@ def check_reproducibility(ctx: ValidationContext) -> list[ValidationFinding]:
     # Missing hashes for local inputs
     for declared in ctx.state.declared_inputs:
         path = str(declared.get("path", ""))
-        if declared.get("existence", "").startswith("observed") and not declared.get("sha256"):
+        if is_observed(str(declared.get("existence", ""))) and not declared.get("sha256"):
             findings.append(_warning("missing_input_hash", f"Local input not hashed: {path}", path))
     # Missing declared outputs
     if not ctx.state.declared_outputs:

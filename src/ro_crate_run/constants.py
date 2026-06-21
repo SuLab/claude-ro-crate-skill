@@ -4,6 +4,7 @@ vocabulary checked by the L0 validator) and small pure helpers derived from them
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 RO_CRATE_VERSION = "1.2"
 RO_CRATE_CONTEXT = "https://w3id.org/ro/crate/1.2/context"
@@ -34,6 +35,32 @@ EXISTENCE_VALUES: tuple[str, ...] = (
     "missing",
     "declared-only",
 )
+
+# Existence classes that were actually observed (a probe or filesystem check confirmed
+# the declaration), keyed by the "observed " value family. is_observed() replaces the
+# scattered `startswith("observed")` checks so the space-bearing literals stay enforced.
+EXISTENCE_OBSERVED: tuple[str, ...] = ("observed local", "observed remote")
+
+# Existence classes whose value does NOT imply local on-disk presence: a remote artifact,
+# or a declaration of something expected/missing/declared-only. is_absent() drives the
+# validator's "legitimately absent on disk" exemption (referenced_file_missing).
+EXISTENCE_ABSENT: tuple[str, ...] = (
+    "observed remote",
+    "expected",
+    "missing",
+    "declared-only",
+)
+
+
+def is_observed(value: str) -> bool:
+    """True when an existence class was actually observed (local or remote)."""
+    return value in EXISTENCE_OBSERVED
+
+
+def is_absent(value: str) -> bool:
+    """True when an existence class does not imply a local file present on disk."""
+    return value in EXISTENCE_ABSENT
+
 
 # Exit code recorded for a command that fails to start (e.g. executable not found),
 # matching the shell convention of 127 for "command not found".
@@ -74,6 +101,18 @@ STEP_TERMINAL_EVENTS: frozenset[str] = frozenset(
     }
 )
 
+# Subagent/Task lifecycle events. The run-model reducer folds these into one reduced
+# record per task; profiles.py counts the raw events (not the collapsed records) for its
+# structured-workflow heuristic. Canonical so the reducer and the heuristic cannot drift.
+SUBAGENT_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "agent.task.created",
+        "agent.task.completed",
+        "agent.subagent.started",
+        "agent.subagent.completed",
+    }
+)
+
 # Permalink to the Workflow RO-Crate 1.0 profile a workflow/provenance crate's root
 # also declares (WfRC 0.5 is a superset of Process Run Crate 0.5 + Workflow RO-Crate 1.0).
 WORKFLOW_RO_CRATE_URI = "https://w3id.org/workflowhub/workflow-ro-crate/1.0"
@@ -83,13 +122,14 @@ _PROCESS_PROFILE_URI = "https://w3id.org/ro/wfrun/process/0.5"
 
 @dataclass(frozen=True)
 class ProfileSpec:
-    """Single source of truth for one Run-Crate profile's fixed facts.
+    """The fixed facts for one Run-Crate profile, in one place.
 
-    Centralizes everything that previously had to be special-cased per profile
-    name across the materializer, the builder's conformsTo logic, and the L3
-    validator: the profile's own conformance URI, the extra profiles a
-    workflow-like root also declares, and whether the root behaves like a
-    workflow run (declares a main workflow + ordered steps).
+    Holds the profile's own conformance URI and display name, the extra profiles a
+    workflow-like root also declares, whether the root behaves like a workflow run
+    (declares a main workflow + ordered steps), and whether it requires the L3
+    HowToStep/ControlAction provenance checks. The materializer, the builder's
+    conformsTo logic, and the L3 validator all read these instead of branching on
+    the profile name.
     """
 
     name: str
@@ -99,35 +139,54 @@ class ProfileSpec:
     extra_conformsTo: tuple[str, ...]
     # True when the root behaves like a workflow run, as opposed to the flat process profile.
     is_workflow_like: bool
+    # Human-readable name for this profile's contextual Profile entity in the crate.
+    label: str
+    # True only for the provenance profile: gates the L3 HowToStep/ControlAction checks.
+    requires_provenance_steps: bool
 
 
 # The Run-Crate profile set is spec-fixed (process / workflow / provenance); these specs are
-# the one place per-profile facts live. Derived lookups below stay byte-identical to the prior
-# hand-maintained constants.
+# the one place per-profile facts live. The derived lookups below are computed from PROFILES
+# so the registry is the single source.
 PROFILES: dict[str, ProfileSpec] = {
     "process": ProfileSpec(
         name="process",
         uri=_PROCESS_PROFILE_URI,
         extra_conformsTo=(),
         is_workflow_like=False,
+        label="Process Run Crate",
+        requires_provenance_steps=False,
     ),
     "workflow": ProfileSpec(
         name="workflow",
         uri="https://w3id.org/ro/wfrun/workflow/0.5",
         extra_conformsTo=(_PROCESS_PROFILE_URI, WORKFLOW_RO_CRATE_URI),
         is_workflow_like=True,
+        label="Workflow Run Crate",
+        requires_provenance_steps=False,
     ),
     "provenance": ProfileSpec(
         name="provenance",
         uri="https://w3id.org/ro/wfrun/provenance/0.5",
         extra_conformsTo=(_PROCESS_PROFILE_URI, WORKFLOW_RO_CRATE_URI),
         is_workflow_like=True,
+        label="Provenance Run Crate",
+        requires_provenance_steps=True,
     ),
 }
 
-# Profile name -> conformance URI, derived from the registry. Kept as a public name/type/value
-# many modules import directly.
+# Profile name -> conformance URI, derived from the registry. A public lookup many modules
+# import directly.
 PROFILE_URIS: dict[str, str] = {name: spec.uri for name, spec in PROFILES.items()}
+
+# Display name for each extra-conformsTo profile URI's contextual Profile entity, so the
+# builder derives those names from the registry rather than a builder-local dict. Process
+# Run Crate reuses the process profile's own label; the Workflow RO-Crate profile is not a
+# Run-Crate profile of its own, so its name is given here directly.
+EXTRA_CONFORMS_TO_LABELS: dict[str, str] = {
+    _PROCESS_PROFILE_URI: PROFILES["process"].label,
+    WORKFLOW_RO_CRATE_URI: "Workflow RO-Crate",
+}
 
 # Profiles whose root entity behaves like a workflow run (they declare a main
 # workflow + ordered steps), as opposed to the flat process profile.
@@ -195,7 +254,7 @@ def is_web_id(eid: str) -> bool:
     return eid.startswith(URI_SCHEME_ID_PREFIXES)
 
 
-def dirty_effect(event_type: str) -> str:
+def dirty_effect(event_type: str) -> Literal["set", "clear", "preserve"]:
     """Classify how appending an event of this type affects state.dirty.
 
     Returns "clear" for the checkpoint-completed event that materializes pending
@@ -214,6 +273,17 @@ def dirty_effect(event_type: str) -> str:
     return "set"
 
 
+# Validation level names: the label each layered checker reports its findings under, and
+# the keys of the CHECKS pipeline (L0 journal through L5 privacy). Shared by validation/*,
+# hooks.py, and commands.py so the level identity has one spelling.
+LEVEL_JOURNAL = "journal"
+LEVEL_STATE = "state"
+LEVEL_ROCRATE = "ro_crate"
+LEVEL_PROFILE = "profile"
+LEVEL_REPRODUCIBILITY = "reproducibility"
+LEVEL_PRIVACY = "privacy"
+
+
 # date_time tuple stamped on every ZIP entry so a public export is byte-deterministic.
 DETERMINISTIC_ZIP_EPOCH: tuple[int, int, int, int, int, int] = (2026, 6, 17, 0, 0, 0)
 
@@ -221,8 +291,8 @@ DEFAULT_STATE_DIR = ".ro-crate-run"
 DEFAULT_LICENSE = "https://creativecommons.org/licenses/by/4.0/"
 
 # Central event-type vocabulary. Every type emitted anywhere in the system must be
-# listed here; the journal-integrity validator (validation/journal.py) rejects any
-# event whose type is not in this set.
+# listed here; the L0 journal-integrity validator rejects any event whose type is not
+# in this set.
 EVENT_TYPES: frozenset[str] = frozenset(
     {
         # Run lifecycle

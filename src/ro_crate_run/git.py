@@ -3,8 +3,9 @@ not-available marker when the directory is not a git repository."""
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
+
+from .proc import run_capture
 
 # Bound every git invocation: ``_git`` runs at the top of essentially every CLI
 # command and hook startup, so a git hung on an unreachable remote, a credential
@@ -19,18 +20,8 @@ def _git(args: list[str], cwd: Path) -> str | None:
     Returns ``None`` when git is unavailable, times out, or the command exits
     non-zero (e.g. the directory is not a git repository).
     """
-    try:
-        out = subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return out.stdout.strip() if out.returncode == 0 else None
+    out = run_capture(["git", *args], timeout=_GIT_TIMEOUT_SECONDS, cwd=str(cwd))
+    return out.stdout.strip() if out is not None else None
 
 
 def git_toplevel(cwd: Path) -> str | None:

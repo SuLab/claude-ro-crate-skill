@@ -40,7 +40,6 @@ def import_existing_ro_crate(crate: Path) -> list[dict[str, object]]:
                     "path": eid,
                     "name": entity.get("name", eid),
                     "engine": "imported-ro-crate",
-                    "confidence": "high",
                 },
             })
         elif any(t.endswith("Action") for t in types) and eid != "./":

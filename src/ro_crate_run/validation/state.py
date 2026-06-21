@@ -5,19 +5,18 @@ accuracy, and the id-map shape."""
 from __future__ import annotations
 
 import json
+from functools import partial
 
-from ro_crate_run.constants import dirty_effect
+from ro_crate_run.constants import LEVEL_STATE, dirty_effect
 from ro_crate_run.ids import new_id_map
 from ro_crate_run.models import ValidationFinding
 
+from ._findings import level_finding
 from .context import ValidationContext
 
-
-def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
-    """Construct an L1 (``state``) error finding; the level is bound here so it is
-    not repeated on every emission in this checker. The two advisory findings
-    (``open_phase``/``open_step``) are constructed inline with ``severity``."""
-    return ValidationFinding("state", code, message, path)
+# L1 (state) findings; the level is bound once here. Most are errors; the two
+# advisory findings (``open_phase``/``open_step``) pass ``severity="warning"``.
+_finding = partial(level_finding, LEVEL_STATE)
 
 
 def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
@@ -35,9 +34,8 @@ def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
             findings.append(
                 _finding("state_hash_mismatch", "state.last_event_hash does not match journal")
             )
-        # state.sequence tracks the LAST event's sequence field (the invariant
-        # journal.py/recovery.py maintain), not the line count — comparing against the
-        # count would falsely flag the instant sequences ever start above 1 or gap.
+        # state.sequence tracks the last event's sequence field, not the line count,
+        # so compare against that (sequences may legitimately start above 1 or gap).
         last_sequence = int(events[-1].get("sequence", 0))
         if state.sequence != last_sequence:
             findings.append(
@@ -45,12 +43,12 @@ def check_state(ctx: ValidationContext) -> list[ValidationFinding]:
             )
 
     if state.current_phase_id:
-        findings.append(ValidationFinding(
-            "state", "open_phase", f"Run has open phase {state.current_phase_id}", severity="warning"
+        findings.append(_finding(
+            "open_phase", f"Run has open phase {state.current_phase_id}", severity="warning"
         ))
     if state.current_step_id:
-        findings.append(ValidationFinding(
-            "state", "open_step", f"Run has open step {state.current_step_id}", severity="warning"
+        findings.append(_finding(
+            "open_step", f"Run has open step {state.current_step_id}", severity="warning"
         ))
 
     lc = state.last_checkpoint

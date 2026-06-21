@@ -17,7 +17,7 @@ from typing import Any, TypeVar, Union, cast, get_args, get_origin
 from . import ids
 from .clock import utc_now, utc_now_compact
 from .constants import resolve_profile
-from .fs import write_json
+from .fs import atomic_write_text, write_json
 from .models import JsonDict, RcrConfig, RcrState
 
 T = TypeVar("T")
@@ -58,9 +58,9 @@ def load_config(state_dir: Path) -> RcrConfig:
 
 def write_state(state_dir: Path, state: RcrState) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    tmp = state_dir / "state.json.tmp"
-    tmp.write_text(_to_json(state))
-    tmp.replace(state_dir / "state.json")
+    # Atomic tmp+replace so a crash mid-write can never leave a truncated state.json;
+    # the temp basename (state.json.tmp) and rename target are unchanged.
+    atomic_write_text(state_dir / "state.json", _to_json(state))
 
 
 def load_state(state_dir: Path) -> RcrState:
@@ -87,8 +87,11 @@ def write_id_map(state_dir: Path, id_map: dict[str, Any] | None = None) -> None:
 def _iter_journal_lines(path: Path) -> Iterator[tuple[int, str]]:
     """Yield ``(1-based index, line)`` for every non-blank journal line.
 
-    The single low-level scan the strict and safe readers share, so the
-    blank-skip rule and ``utf-8`` decoding live in exactly one place.
+    The shared low-level scan behind :func:`read_events` and
+    :func:`read_events_safe`, centralizing the blank-skip rule and ``utf-8``
+    decoding for them. Note ``recovery._read_events_repairing_partial_line`` is a
+    third reader that re-derives this scan because it must key its truncation
+    repair on the *physical* last line, not the last non-blank one this yields.
     """
     for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if line.strip():

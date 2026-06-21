@@ -16,6 +16,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, cast
 
+from .fs import write_json
+
 # Permission bits OR-ed into copied executable assets (owner/group/other rwx, x).
 _EXEC_MODE_BITS = 0o755
 
@@ -56,11 +58,12 @@ def install_project(target: str, force: bool = False) -> int:
     _copy_resource_file(boot_src, claude / "hooks" / "_bootstrap.py", executable=False)
     settings_fragment = _read_json_resource(_asset_root() / "templates" / "settings.rocrate.json")
     settings_rocrate_path = claude / "settings.rocrate.json"
-    settings_rocrate_path.write_text(json.dumps(settings_fragment, indent=2, sort_keys=True) + "\n")
+    # Canonical pretty-JSON form (2-space indent, sorted keys, trailing newline) owned by fs.write_json.
+    write_json(settings_rocrate_path, settings_fragment)
     settings_path = claude / "settings.json"
     existing = json.loads(settings_path.read_text()) if settings_path.exists() else {}
     merged = _merge_settings(existing, settings_fragment)
-    settings_path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    write_json(settings_path, merged)
     print("Project files installed and .claude/settings.json updated.")
     return 0
 

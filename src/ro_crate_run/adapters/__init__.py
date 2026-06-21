@@ -13,7 +13,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
-from . import cwl, galaxy, nextflow, snakemake
+
+def path_matches(path: Path, suffixes: tuple[str, ...], filenames: tuple[str, ...]) -> bool:
+    """Return whether ``path`` names a definition for the given suffix/filename set.
+
+    The single place the suffix/filename match rule is spelled, so the path-only
+    detection seam (``engine_for_path``) and each adapter's ``identify`` guard
+    share one predicate instead of re-typing it per adapter. Defined before the
+    adapter submodules are imported because they import it at module load.
+    """
+    return path.suffix in suffixes or path.name in filenames
+
+
+from . import cwl, galaxy, nextflow, snakemake  # noqa: E402
 
 
 @runtime_checkable
@@ -24,7 +36,7 @@ class WorkflowAdapter(Protocol):
     ``homepage`` is the engine's canonical URL used for its SoftwareApplication
     ``url``; ``SUFFIXES`` / ``FILENAMES`` declare the path patterns that name a
     workflow definition for this engine (used by the path-only detection seam);
-    ``identify`` returns ``{engine, path, steps}`` or ``None``.
+    ``identify`` returns ``{engine, steps}`` or ``None``.
     """
 
     engine_name: str
@@ -74,7 +86,7 @@ def engine_for_path(path: Path) -> str | None:
     yields ``None``.
     """
     for adapter in ADAPTERS:
-        if path.suffix in adapter.SUFFIXES or path.name in adapter.FILENAMES:
+        if path_matches(path, adapter.SUFFIXES, adapter.FILENAMES):
             return adapter.engine_name
     return None
 
@@ -95,12 +107,3 @@ def detect_engine(path: Path) -> dict[str, object] | None:
         if raw is not None:
             return raw
     return None
-
-
-def extract_steps(path: Path) -> list[str]:
-    """Return the step names a workflow definition declares, or an empty list."""
-    result = detect_engine(path)
-    if result is None:
-        return []
-    steps = result.get("steps", [])
-    return list(steps) if isinstance(steps, list) else []

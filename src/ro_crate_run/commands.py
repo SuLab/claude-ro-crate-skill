@@ -17,6 +17,7 @@ from . import __version__
 from .config import default_config
 from .constants import BYTES_PER_MB
 from .context import ProjectContext
+from .events import SourceKind
 from .export import finalize
 from .fs import bare_sha256, sha256_file
 from .git import observe_git_state
@@ -61,7 +62,7 @@ _classify_existence = classify_existence
 
 def _bootstrap_run(
     ctx: ProjectContext, title: str, mode: str, profile: str,
-    *, source_kind: str = "skill_command",
+    *, source_kind: SourceKind = "skill_command",
 ) -> Path:
     """Create the .ro-crate-run state + emit run.started / environment.observed.
 

@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .constants import BYTES_PER_MB
+from .constants import BYTES_PER_MB, DEFAULT_ENV_ALLOWLIST
 
 JsonDict = dict[str, Any]
 
@@ -62,15 +62,7 @@ class RedactionConfig:
     enabled: bool = True
     patterns_file: str = ".ro-crate-run/secrets-redaction.json"
     environment_allowlist: list[str] = field(
-        default_factory=lambda: [
-            "PATH",
-            "LANG",
-            "LC_ALL",
-            "SHELL",
-            "PYTHONPATH",
-            "CONDA_DEFAULT_ENV",
-            "VIRTUAL_ENV",
-        ]
+        default_factory=lambda: list(DEFAULT_ENV_ALLOWLIST)
     )
 
 
@@ -223,8 +215,7 @@ class ValidationFinding:
     code: str
     message: str
     path: str = ""
-    # Producing checker states its intent directly; the validator reads this
-    # instead of recovering severity by string-matching codes.
+    # Severity the producing checker assigns to this finding; the validator reads it directly.
     severity: str = "error"
 
 

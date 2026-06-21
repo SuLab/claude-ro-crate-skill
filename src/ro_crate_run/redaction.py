@@ -6,9 +6,9 @@ crate. A `Redactor` carries a table of compiled credential patterns (built-in
 plus optional user-supplied ones) and an environment-variable allowlist.
 
 This module is also the home for the on-disk secret-scan helpers
-(`iter_regular_files`, `scan_file_for_secrets`, `scan_tree`): they read each
+(`iter_regular_files`, `scan_file_for_secrets`): `scan_file_for_secrets` reads a
 file losslessly as latin-1 so an ASCII secret embedded in an otherwise-binary
-blob is still caught, and skip a file only when it cannot be read at all
+blob is still caught, and skips a file only when it cannot be read at all
 (OSError). `iter_regular_files` is the one canonical tree walk callers route
 through.
 """
@@ -174,9 +174,8 @@ class Redactor:
         for key, value in env.items():
             if key not in self.environment_allowlist:
                 continue
-            # A disabled redactor keeps the historical no-op behavior: it neither
-            # drops sensitive-named keys nor masks values (matching the former
-            # never-match-key_pattern path).
+            # A disabled redactor neither drops sensitive-named keys nor masks
+            # values: an allowlisted var is captured verbatim.
             if self.enabled and self.key_pattern.search(key):
                 continue
             captured[key] = self.redact_text(value).text
@@ -225,19 +224,30 @@ class Redactor:
         return value is not None and not isinstance(value, (dict, list))
 
 
-def scan_file_for_secrets(path: Path, redactor: Redactor) -> list[str]:
-    """Return the matched secret-category names for a single file.
+def read_text_lossless(path: Path) -> str | None:
+    """Read a file as latin-1, returning ``None`` when it cannot be read.
 
-    The file is decoded as latin-1 (a lossless byte->char mapping) rather than
-    UTF-8: an ASCII secret embedded in an otherwise-binary blob must still be
-    caught instead of skipped. Only a file that cannot be read at all (OSError)
-    is skipped, yielding an empty list.
+    latin-1 is a lossless byte->char mapping (never raises on content), so an
+    ASCII secret embedded in an otherwise-binary blob is preserved rather than
+    skipped. Only an unreadable file (OSError) yields ``None``. The single owner
+    of the read policy shared by the on-disk scanner and the rewrite pass.
     """
     try:
         raw = path.read_bytes()
     except OSError:
+        return None
+    return raw.decode("latin-1")
+
+
+def scan_file_for_secrets(path: Path, redactor: Redactor) -> list[str]:
+    """Return the matched secret-category names for a single file.
+
+    Reads via `read_text_lossless`; an unreadable file (OSError) yields an empty
+    list.
+    """
+    text = read_text_lossless(path)
+    if text is None:
         return []
-    text = raw.decode("latin-1")
     return list(redactor.redact_text(text).categories)
 
 
@@ -250,21 +260,6 @@ def iter_regular_files(root: Path) -> Iterator[Path]:
     for path in sorted(root.rglob("*")):
         if path.is_file():
             yield path
-
-
-def scan_tree(root: Path, redactor: Redactor) -> list[tuple[Path, list[str]]]:
-    """Scan every regular file under ``root`` for secrets.
-
-    Returns one ``(path, categories)`` entry per file in which at least one
-    secret category matched, in sorted path order. Uses the same hardened
-    latin-1 / OSError-only policy as `scan_file_for_secrets`.
-    """
-    hits: list[tuple[Path, list[str]]] = []
-    for path in iter_regular_files(root):
-        categories = scan_file_for_secrets(path, redactor)
-        if categories:
-            hits.append((path, categories))
-    return hits
 
 
 def redaction_categories(*results: RedactionResult) -> list[str]:

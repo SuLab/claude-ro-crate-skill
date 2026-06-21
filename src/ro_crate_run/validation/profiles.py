@@ -4,29 +4,30 @@ structure, and provenance step/control-action links."""
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from ro_crate_run.constants import (
     ACTION_STATUS_FAILED,
+    LEVEL_PROFILE,
     PROFILES,
     ROOT_DATASET_ID,
 )
 from ro_crate_run.models import ValidationFinding
 
+from ._findings import level_finding
 from .context import ValidationContext
-from .graphview import is_action, types_of
+from .graphview import as_list, is_action, types_of
 
 # Prefix the materializer mints on workflow parameter-value PropertyValues
 # (e.g. ``#param-value/<name>``); used to tell those apart from other
 # PropertyValue nodes that need no exampleOfWork link.
 _PARAM_ID_PREFIX = "#param"
 
-
-def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
-    """Construct an L3 (``profile``) finding; the level is bound here so it is not
-    repeated on every emission in this checker."""
-    return ValidationFinding("profile", code, message, path)
+# L3 (profile) findings; the level is bound once here. Most are errors; the
+# structural-quality findings pass ``severity="warning"``.
+_finding = partial(level_finding, LEVEL_PROFILE)
 
 
 def _actions(entities: dict[Any, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -98,9 +99,10 @@ def _check_workflow(ctx: ValidationContext, entities: dict[Any, dict[str, Any]])
             and (e.get("instrument") or {}).get("@id") == main_id
         ]
         if not wf_instrument_actions:
-            # Structural-quality warning: downgraded from an error outside strict mode.
-            findings.append(ValidationFinding(
-                "profile", "workflow_no_action_uses_instrument",
+            # Always a warning: a missing workflow-as-instrument link is a structural-quality
+            # issue, not a hard conformance failure, so it never escalates to an error.
+            findings.append(_finding(
+                "workflow_no_action_uses_instrument",
                 "No action uses the ComputationalWorkflow as instrument", severity="warning",
             ))
     # L3 check (b): FormalParameter entities when workflow declares inputs/outputs
@@ -110,8 +112,8 @@ def _check_workflow(ctx: ValidationContext, entities: dict[Any, dict[str, Any]])
     has_wf_io = bool(wf_inputs or wf_outputs)
     has_formal_params = any("FormalParameter" in types_of(e) for e in entities.values())
     if has_wf_io and not has_formal_params:
-        findings.append(ValidationFinding(
-            "profile", "workflow_missing_formal_parameters",
+        findings.append(_finding(
+            "workflow_missing_formal_parameters",
             "Workflow declares inputs/outputs but no FormalParameter entities found", severity="warning",
         ))
     # L3 check (c): concrete parameter values use exampleOfWork
@@ -122,8 +124,8 @@ def _check_workflow(ctx: ValidationContext, entities: dict[Any, dict[str, Any]])
             fp_id = entity.get("@id", "")
             # Only flag PropertyValues that look like workflow parameter values (#param-value/...)
             if str(fp_id).startswith(_PARAM_ID_PREFIX):
-                findings.append(ValidationFinding(
-                    "profile", "parameter_value_missing_exampleOfWork",
+                findings.append(_finding(
+                    "parameter_value_missing_exampleOfWork",
                     f"Parameter value {fp_id} missing exampleOfWork link to FormalParameter", severity="warning",
                 ))
     return findings
@@ -136,8 +138,8 @@ def _check_provenance(ctx: ValidationContext, entities: dict[Any, dict[str, Any]
         findings.append(_finding("provenance_missing_steps", "Provenance Run Crate requires HowToStep entities"))
     if not any("ControlAction" in types_of(e) for e in entities.values()):
         findings.append(_finding("provenance_missing_control_action", "Provenance Run Crate requires ControlAction links"))
-    # Provenance 0.5 MUST (05-provenance-run-crate-05.md line 13): every HowToStep's
-    # `workExample` MUST reference the tool (or subworkflow) that implements the step.
+    # Provenance: every HowToStep's `workExample` must reference the tool (or
+    # subworkflow) that implements the step.
     for step in steps:
         if not step.get("workExample"):
             findings.append(
@@ -146,9 +148,9 @@ def _check_provenance(ctx: ValidationContext, entities: dict[Any, dict[str, Any]
                     f"HowToStep {step.get('@id')} missing workExample (tool implementing the step)",
                 )
             )
-    # Provenance 0.5 MUST (05-provenance-run-crate-05.md line 9): a ComputationalWorkflow
-    # that orchestrates steps MUST link the orchestrated tools via `hasPart`. Flag any
-    # provenance-profile workflow that declares `step` but omits a non-empty `hasPart`.
+    # Provenance: a ComputationalWorkflow that orchestrates steps must link the
+    # orchestrated tools via `hasPart`. Flag any workflow that declares `step` but
+    # omits a non-empty `hasPart`.
     for workflow in entities.values():
         if "ComputationalWorkflow" not in types_of(workflow):
             continue
@@ -167,18 +169,13 @@ def _check_provenance(ctx: ValidationContext, entities: dict[Any, dict[str, Any]
 def _check_root_profile(ctx: ValidationContext, entities: dict[Any, dict[str, Any]]) -> list[ValidationFinding]:
     """The root Data Entity MUST declare conformance to the selected Run-Crate
     profile (via ``conformsTo``). Emitted here, after metadata is confirmed
-    present, rather than from the ro_crate checker so it stays a profile-level
-    finding alongside the rest of the profile rules.
-
-    Only checked when the root entity exists — a wholly-missing root is reported
-    by the ro_crate checker (``root_missing``), which mirrors the original guard
-    where this rule ran after that checker's early return on a missing root."""
+    present, so it stays a profile-level finding alongside the rest of the profile
+    rules. Only checked when the root entity exists — a wholly-missing root is
+    reported by the ro_crate checker (``root_missing``)."""
     root = entities.get(ROOT_DATASET_ID)
     if not root:
         return []
-    conforms = root.get("conformsTo", [])
-    if isinstance(conforms, dict):
-        conforms = [conforms]
+    conforms = as_list(root.get("conformsTo", []))
     selected_spec = PROFILES.get(ctx.state.selected_profile)
     selected_uri = selected_spec.uri if selected_spec else ""
     if {"@id": ctx.state.profile_uri} not in conforms and {"@id": selected_uri} not in conforms:
@@ -197,6 +194,6 @@ def check_profile(ctx: ValidationContext) -> list[ValidationFinding]:
     findings += _check_process(ctx, entities)
     if spec is not None and spec.is_workflow_like:
         findings += _check_workflow(ctx, entities)
-    if profile == "provenance":
+    if spec is not None and spec.requires_provenance_steps:
         findings += _check_provenance(ctx, entities)
     return findings

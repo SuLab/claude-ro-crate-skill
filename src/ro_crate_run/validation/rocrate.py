@@ -4,24 +4,28 @@ reachability, referenced-file presence, and recorded-hash integrity."""
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
-from ro_crate_run.constants import RO_CRATE_SPEC_URI, ROOT_DATASET_ID, is_web_id
+from ro_crate_run.constants import (
+    EXISTENCE_ABSENT,
+    LEVEL_ROCRATE,
+    RO_CRATE_SPEC_URI,
+    ROOT_DATASET_ID,
+    is_web_id,
+)
 from ro_crate_run.fs import bare_sha256, sha256_file
 from ro_crate_run.models import ValidationFinding
 
+from ._findings import level_finding
 from .context import ValidationContext
 from .graphview import as_list, types_of
 from .jsonld import expand_metadata
 
 _ROOT_REQUIRED_ALWAYS = ("name", "description", "license")
-_ROOT_REQUIRED_CONDITIONAL = ("datePublished",)
 
-
-def _finding(code: str, message: str, path: str = "") -> ValidationFinding:
-    """Construct an L2 (``ro_crate``) finding; the level is bound here so it is
-    not repeated on every emission in this checker."""
-    return ValidationFinding("ro_crate", code, message, path)
+# L2 (ro_crate) findings are always errors; the level is bound once here.
+_finding = partial(level_finding, LEVEL_ROCRATE)
 
 
 def _deref(candidate: Any, entities: dict[Any, dict[str, Any]]) -> Any:
@@ -87,13 +91,11 @@ def _find_anonymous_nodes(value: Any) -> list[dict[str, Any]]:
     """Recursively collect dicts that carry an ``@type`` but neither an ``@id``
     nor an ``@value`` — anonymous (un-identified) entities.
 
-    RO-Crate 1.2 base MUST (01-rocrate12-base.md lines 49-50): nested entities MUST
-    be separate contextual entities in the flat @graph (no anonymous inlining) and
-    every entity MUST have an ``@id``. A dict with ``@type`` but no ``@id``/``@value``
-    is an entity reference that was inlined without an identifier — a MUST violation.
-    A dict carrying ``@value`` is a typed JSON-LD literal (not an entity), so it is
-    exempt. Dicts that are pure references (``{"@id": ...}`` with no ``@type``) are
-    also fine.
+    RO-Crate 1.2 base requires every entity to be a separate, identified node in the
+    flat ``@graph`` (no anonymous inlining). A dict with ``@type`` but no ``@id``/
+    ``@value`` is an entity that was inlined without an identifier — a violation. A
+    dict carrying ``@value`` is a typed JSON-LD literal (not an entity), so it is
+    exempt, as are pure references (``{"@id": ...}`` with no ``@type``).
     """
     found: list[dict[str, Any]] = []
     if isinstance(value, dict):
@@ -111,10 +113,10 @@ def _haspart_reachable(graph: list[dict[str, Any]]) -> set[str]:
     """The set of @ids reachable from the Root Data Entity ``./`` by following
     ``hasPart`` edges only (a hasPart-only walk).
 
-    RO-Crate 1.2 base MUST (01-rocrate12-base.md line 33): data entities MUST be
-    linked, directly or indirectly, from the Root Data Entity using the ``hasPart``
-    property. Reachability via ``mentions``/``object``/``result`` etc. does NOT
-    satisfy this MUST.
+    RO-Crate 1.2 base requires data entities to be linked, directly or indirectly,
+    from the Root Data Entity via ``hasPart``. Reachability through
+    ``mentions``/``object``/``result`` etc. does not satisfy that requirement, so
+    those edges are deliberately not followed here.
     """
     by_id = {str(e.get("@id")): e for e in graph if isinstance(e, dict) and e.get("@id")}
     reachable: set[str] = set()
@@ -186,11 +188,13 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         findings.append(_finding("root_missing", "Root Data Entity is missing"))
         return findings
 
-    if root.get("@type") != "Dataset" and "Dataset" not in root.get("@type", []):
+    if "Dataset" not in types_of(root):
         findings.append(_finding("root_not_dataset", "Root must be Dataset"))
     for key in _ROOT_REQUIRED_ALWAYS:
         if key not in root:
             findings.append(_finding(f"root_missing_{key}", f"Root missing {key}"))
+    # datePublished is required only when the config opts in (it is meaningful on a
+    # published crate but noise on an in-progress run).
     if ctx.cfg.validation.require_date_published and "datePublished" not in root:
         findings.append(_finding("root_missing_datePublished", "Root missing datePublished"))
 
@@ -202,11 +206,10 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
     # Files legitimately absent on disk: removed by a recorded DeleteAction, or declared
     # with an existence that does not imply local presence (remote/expected/missing/
     # declared-only). Such entities must not be reported as referenced_file_missing.
-    _ABSENT_EXISTENCE = {"observed remote", "expected", "missing", "declared-only"}
     absent_ids = {
         str(d.get("path"))
         for d in (ctx.state.declared_inputs + ctx.state.declared_outputs)
-        if d.get("existence") in _ABSENT_EXISTENCE
+        if d.get("existence") in EXISTENCE_ABSENT
     }
     exempt_ids = _deleted_file_ids(metadata.get("@graph", [])) | absent_ids
     for entity in metadata.get("@graph", []):
@@ -224,7 +227,7 @@ def check_rocrate(ctx: ValidationContext) -> list[ValidationFinding]:
         if resolved is None:
             # Also trust the existence materialized on the entity itself (e.g. imported files
             # carry a declared-only existence but are not in state.declared_*), not only state.
-            if eid not in exempt_ids and _entity_existence(entity, entities) not in _ABSENT_EXISTENCE:
+            if eid not in exempt_ids and _entity_existence(entity, entities) not in EXISTENCE_ABSENT:
                 findings.append(_finding("referenced_file_missing", f"Referenced file not present: {eid}", eid))
             continue
         # Content integrity: a crate's recorded sha256 must match the bytes on disk.
