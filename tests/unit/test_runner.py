@@ -5,7 +5,7 @@ from pathlib import Path
 from ro_crate_run import commands
 from ro_crate_run.cli import main
 from ro_crate_run.runner import CommandRunner
-from ro_crate_run.state import read_events
+from ro_crate_run.state import load_config, read_events, write_config
 
 
 def _start(tmp_path: Path, monkeypatch) -> None:
@@ -171,6 +171,42 @@ def test_redaction_applied_event_carries_real_categories(tmp_path: Path, monkeyp
     applied = [e for e in events if e["event_type"] == "redaction.applied"]
     assert applied, "no redaction.applied event emitted for a command with a secret in argv"
     assert "openai-key" in applied[-1]["payload"]["categories"]
+
+
+def _input_snapshot(tmp_path: Path) -> dict:
+    sidecar = json.loads(
+        sorted((tmp_path / ".ro-crate-run" / "commands").glob("*.json"))[-1].read_text()
+    )
+    return sidecar["input_snapshots"][0]
+
+
+def test_hash_large_files_flag_lifts_cap_on_runner_input_snapshots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Config contract: the runner's input/output snapshotting must honor hash_large_files.
+    # With a zero-MB cap a non-empty input exceeds the gate and is skipped; setting
+    # hash_large_files lifts the cap so the same input is hashed. This proves the runner
+    # routes through HashPolicy.max_hash_bytes() rather than the raw max_file_size_mb * BYTES.
+    _start(tmp_path, monkeypatch)
+    sd = tmp_path / ".ro-crate-run"
+    (tmp_path / "big.txt").write_text("x" * 4096)
+
+    cfg = load_config(sd)
+    cfg.hash_policy.max_file_size_mb = 0  # any non-empty file exceeds the cap
+    cfg.hash_policy.hash_large_files = False
+    write_config(sd, cfg)
+    assert CommandRunner(sd, tmp_path).run(["true"], inputs=["big.txt"]) == 0
+    skipped = _input_snapshot(tmp_path)
+    assert skipped["hash_status"] == "skipped"
+    assert skipped["hash_skip_reason"] == "larger_than_policy"
+    assert "sha256" not in skipped
+
+    cfg.hash_policy.hash_large_files = True  # lift the cap
+    write_config(sd, cfg)
+    assert CommandRunner(sd, tmp_path).run(["true"], inputs=["big.txt"]) == 0
+    hashed = _input_snapshot(tmp_path)
+    assert hashed["hash_status"] == "hashed"
+    assert hashed["sha256"].startswith("sha256:")
 
 
 def test_pump_survives_non_utf8_child_output(tmp_path: Path, monkeypatch) -> None:

@@ -1,5 +1,5 @@
-"""OCI image-reference parsing, split out of the CLI handler layer so it can be
-unit-tested without going through ``rcr container``."""
+"""OCI image-reference parsing for ``rcr container``: split a reference into its
+registry, image, tag, and digest components."""
 
 from __future__ import annotations
 

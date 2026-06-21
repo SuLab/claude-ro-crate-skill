@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .clock import utc_now
-from .constants import BYTES_PER_MB, SIDECAR_SCHEMA_VERSION, STARTUP_EXIT_CODE
+from .constants import SIDECAR_SCHEMA_VERSION, STARTUP_EXIT_CODE
 from .fs import file_record
 from .git import observe_git_state
 from .ids import IdMap
@@ -25,6 +25,13 @@ from .state import load_config, load_state
 
 
 class CommandRunner:
+    """Run a command under provenance capture and journal its lifecycle.
+
+    Snapshots declared inputs/outputs, launches the command, streams and redacts
+    stdout/stderr to per-command log files, writes a sidecar record, and appends
+    the execution.command.started event followed by completed or failed.
+    """
+
     def __init__(self, state_dir: Path, project_dir: Path | None = None) -> None:
         self.state_dir = state_dir
         self.project_dir = project_dir or state_dir.parent
@@ -109,6 +116,13 @@ class CommandRunner:
         inputs: list[str] | None = None,
         outputs: list[str] | None = None,
     ) -> int:
+        """Execute ``argv`` under capture and return its exit code.
+
+        Snapshots inputs and the outputs-before state, emits the started event and
+        initial sidecar, streams+redacts stdout/stderr in pump threads, then takes the
+        outputs-after snapshot and emits completed (or failed on nonzero/signal/startup
+        error) plus a redaction.applied tally. A launch failure returns STARTUP_EXIT_CODE.
+        """
         if not argv:
             raise ValueError("rcr run requires a command after --")
         state = load_state(self.state_dir)
@@ -123,7 +137,9 @@ class CommandRunner:
         recorded_argv = [r.text for r in argv_results]
         recorded_display = redactor.redact_text(shlex.join(argv)).text
         env_capture = redactor.capture_environment(dict(os.environ))
-        max_hash_bytes = cfg.hash_policy.max_file_size_mb * BYTES_PER_MB
+        # The encapsulated gate honors hash_large_files; an inline MB->bytes product would
+        # silently ignore it and cap input/output snapshots at max_file_size_mb regardless.
+        max_hash_bytes = cfg.hash_policy.max_hash_bytes()
         input_snapshots = [
             file_record(
                 self.project_dir / inp,

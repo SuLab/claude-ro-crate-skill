@@ -11,11 +11,11 @@ import shutil
 import sys
 from importlib import metadata
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Union, cast
 
 from . import __version__
 from .config import default_config
-from .constants import BYTES_PER_MB
+from .constants import LEVEL_PRIVACY, is_observed
 from .context import ProjectContext
 from .events import SourceKind
 from .export import finalize
@@ -51,9 +51,8 @@ from .state import (
 )
 from .validation.validator import validate_run
 
-# Backwards-compatible aliases: the OCI/probe/scan/classify helpers were relocated
-# to focused modules (oci.py, software_probe.py). They are re-exported under their
-# original private names so callers that import them from here keep working unchanged.
+# Private-name aliases for the OCI/probe/scan/classify helpers (their homes are oci.py
+# and software_probe.py), so test modules can import them from here under one namespace.
 _parse_image_ref = parse_image_ref
 _probe_software = probe_software
 _scan_lockfiles = scan_lockfiles
@@ -242,6 +241,8 @@ def status(json_output: bool = False) -> int:
 
 
 def _print_status(state_dir: Path, *, json_output: bool = False) -> None:
+    """Print the run's status as either a JSON payload or a human-readable summary,
+    folding in the live validation report and any missing-required-metadata gaps."""
     state = load_state(state_dir)
     validation = validate_run(state_dir, strict=False, public=False, append_event=False)
     missing_required_metadata = []
@@ -260,7 +261,7 @@ def _print_status(state_dir: Path, *, json_output: bool = False) -> None:
         "declared_outputs": state.declared_outputs,
         "missing_required_metadata": missing_required_metadata,
         "privacy_warnings": [
-            warning.message for warning in validation.warnings if warning.level == "privacy"
+            warning.message for warning in validation.warnings if warning.level == LEVEL_PRIVACY
         ],
         "validation": {
             "status": validation.status,
@@ -381,10 +382,11 @@ def declare_io(
         "copy_policy": "copy" if copy else "reference",
     }
     # Hash local input files (sha256 + size) so the missing_input_hash warning is suppressible.
-    if kind == "input" and existence_val.startswith("observed"):
+    if kind == "input" and is_observed(existence_val):
         local_path = Path(path)
         cfg = load_config(ctx.state_dir)
-        max_bytes = cfg.hash_policy.max_file_size_mb * BYTES_PER_MB
+        # max_hash_bytes() honors hash_large_files (lifts the cap), unlike the raw size limit.
+        max_bytes = cfg.hash_policy.max_hash_bytes()
         if local_path.exists() and local_path.is_file():
             if local_path.stat().st_size <= max_bytes:
                 input_digest = sha256_file(local_path)
@@ -426,7 +428,8 @@ def _refresh_run_dirty(state_dir: Path) -> None:
     if state.dirty:
         return
     cfg = load_config(state_dir)
-    max_bytes = cfg.hash_policy.max_file_size_mb * BYTES_PER_MB
+    # max_hash_bytes() honors hash_large_files (lifts the cap), unlike the raw size limit.
+    max_bytes = cfg.hash_policy.max_hash_bytes()
     chk = state.last_checkpoint
     version_changed = bool(chk and chk.materializer_version not in {None, __version__})
     if version_changed or detect_output_changes(state_dir, state, max_bytes):
@@ -737,13 +740,14 @@ def do_redact(dry_run: bool, apply: bool, policy: str | None = None) -> int:
 def set_config(key: str, value: str) -> int:
     """Set a config key (``section.field`` or top-level), validating it against the schema.
 
-    Rejects unknown keys/sections, persists config.json, and emits run.config.updated.
+    Rejects unknown keys/sections, coerces the value to the field's declared type
+    (rejecting a value that cannot), persists config.json, and emits run.config.updated.
     """
+    import typing
     from dataclasses import fields, is_dataclass
 
     ctx = ProjectContext.from_cwd()
     cfg = load_config(ctx.state_dir)
-    typed = _coerce_config_value(value)
     # Validate the key against the config schema rather than silently dropping unknown keys.
     if "." in key:
         section, field = key.split(".", 1)
@@ -757,12 +761,21 @@ def set_config(key: str, value: str) -> int:
         if field not in {f.name for f in fields(sub)}:
             print(f"Unknown config field: {section}.{field}", file=sys.stderr)
             return 1
-        setattr(sub, field, typed)
+        target, attr = sub, field
     else:
         if key not in {f.name for f in fields(cfg)}:
             print(f"Unknown config key: {key!r}", file=sys.stderr)
             return 1
-        setattr(cfg, key, typed)
+        target, attr = cfg, key
+    # Coerce against the field's declared type (the same get_type_hints path state._from_dict
+    # uses) so list/int fields can't be silently corrupted by a raw CLI string.
+    field_type = typing.get_type_hints(type(target)).get(attr)
+    try:
+        typed = _coerce_config_value(value, field_type)
+    except ValueError as exc:
+        print(f"Invalid value for {key}: {exc}", file=sys.stderr)
+        return 1
+    setattr(target, attr, typed)
     write_config(ctx.state_dir, cfg)
     EventWriter(ctx.state_dir).append(
         "run.config.updated", {"key": key, "value": value}, source_kind="human_cli"
@@ -770,13 +783,51 @@ def set_config(key: str, value: str) -> int:
     return 0
 
 
-def _coerce_config_value(value: str) -> Any:
+def _coerce_config_value(value: str, field_type: Any = None) -> Any:
+    """Coerce a CLI config string to the field's declared type.
+
+    Routes through the field's resolved type hint: bool fields accept true/false,
+    int fields require a parseable integer, list fields split on commas, and str
+    (or untyped) fields pass through. Raises ValueError when the value does not fit
+    the declared type so the setter can reject it instead of storing a wrong type.
+    """
+    import typing
+
+    typ = _unwrap_optional_type(field_type)
+    origin = typing.get_origin(typ)
+    if typ is bool:
+        lowered = value.lower()
+        if lowered in {"true", "false"}:
+            return lowered == "true"
+        raise ValueError(f"expected a boolean (true/false), got {value!r}")
+    if typ is int:
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(f"expected an integer, got {value!r}") from None
+    if origin in {list, set, tuple}:
+        return [part for part in value.split(",") if part]
+    if typ is str:
+        return value
+    # Untyped field (no hint available): keep the historical lenient inference so a
+    # missing hint never breaks a previously-accepted scalar.
     lowered = value.lower()
     if lowered in {"true", "false"}:
         return lowered == "true"
     if value.isdigit():
         return int(value)
     return value
+
+
+def _unwrap_optional_type(typ: Any) -> Any:
+    """Return the inner type of ``Optional[T]`` / ``T | None``, else ``typ`` unchanged."""
+    import typing
+
+    if typing.get_origin(typ) is Union:
+        non_none = [arg for arg in typing.get_args(typ) if arg is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+    return typ
 
 
 def abort(reason: str = "") -> int:
@@ -841,6 +892,7 @@ def import_ro_crate(path: str) -> int:
 
 
 def _package_version(package: str) -> str:
+    """Return an installed package's version, or ``"unknown"`` when it is not installed."""
     try:
         return metadata.version(package)
     except metadata.PackageNotFoundError:

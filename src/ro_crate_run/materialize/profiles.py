@@ -6,10 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ro_crate_run.constants import PROFILE_URIS, PROFILES
+from ro_crate_run.constants import PROFILE_URIS, PROFILES, SUBAGENT_EVENT_TYPES
 from ro_crate_run.models import RunModel
-
-from .run_model import SUBAGENT_EVENT_TYPES
 
 
 @dataclass
@@ -31,9 +29,9 @@ def select_profile(run_model: RunModel, requested: str = "auto") -> ProfileSelec
     if run_model.commands:
         evidence.append({"kind": "commands", "count": len(run_model.commands)})
     activity = run_model.agent_activity
-    # agent_activity.subagents is now reduced to one record per task, but the heuristic must
-    # count the raw subagent lifecycle events (as before the reduction moved into the reducer)
-    # so promotion is byte-identical; count those events straight from the journal.
+    # agent_activity.subagents is collapsed to one record per task, so the structured-work
+    # heuristic counts the raw subagent lifecycle events straight from the journal
+    # (run_model.events) rather than the collapsed records.
     subagent_events = sum(1 for e in run_model.events if e.event_type in SUBAGENT_EVENT_TYPES)
     agent_actions = (
         len(activity.file_actions) + len(activity.raw_commands) + subagent_events
@@ -125,8 +123,8 @@ def enrich_with_adapter(model: RunModel, project_dir: Path) -> None:
             detected = adapters.detect_engine(wf_path)
             if detected is not None:
                 model.workflow["engine"] = str(detected["engine"])
-                # detect_engine already returned the adapter's steps; reading them
-                # here avoids extract_steps re-detecting and re-parsing the same file.
+                # detect_engine already parsed the definition and returned its steps, so
+                # read them from the result rather than re-parsing the file.
                 raw_steps = detected.get("steps", [])
                 steps = raw_steps if isinstance(raw_steps, list) else []
                 for step_id in steps:

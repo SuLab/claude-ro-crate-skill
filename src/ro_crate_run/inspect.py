@@ -15,6 +15,7 @@ _NO_CRATE = {"error": "no crate; run rcr checkpoint"}
 
 
 def inspect_events(state_dir: Path) -> dict[str, object]:
+    """Summarise the event journal: count, distinct types, and first/last sequence."""
     events = read_events(state_dir)
     return {
         "event_count": len(events),
@@ -25,6 +26,8 @@ def inspect_events(state_dir: Path) -> dict[str, object]:
 
 
 def inspect_crate(state_dir: Path) -> dict[str, object]:
+    """Summarise the materialized crate (name, profile, action/file counts), or the
+    no-crate sentinel when nothing has been checkpointed yet."""
     metadata_path = state_dir / "ro-crate" / "ro-crate-metadata.json"
     # Guard the missing manifest the same way mermaid_graph does: a run that has
     # never checkpointed has no crate, so report cleanly rather than raising.
@@ -46,6 +49,8 @@ def inspect_crate(state_dir: Path) -> dict[str, object]:
 
 
 def mermaid_graph(state_dir: Path) -> str:
+    """Render the crate's actions and their input/output/instrument edges as a Mermaid
+    graph (an empty ``graph TD`` when no crate exists yet)."""
     metadata_path = state_dir / "ro-crate" / "ro-crate-metadata.json"
     if not metadata_path.exists():
         return "graph TD\n"

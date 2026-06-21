@@ -148,6 +148,10 @@ def plan_file_inclusion(model: RunModel, cfg: RcrConfig, project_dir: Path) -> l
         included = _included_for_role(role, fp)
         is_file = resolved.exists() and resolved.is_file()
         size_ok = is_file and resolved.stat().st_size <= max_bytes
+        # Copy-vs-reference decision, highest precedence first: an explicit per-declaration
+        # "reference" always references; a non-regular or over-size file can only be
+        # referenced; an explicit "copy" copies when the role is included; otherwise the
+        # global copy_mode governs. `reason` records which branch decided.
         if copy_policy == "reference":
             copy, reason = False, "explicit-reference"
         elif not is_file:

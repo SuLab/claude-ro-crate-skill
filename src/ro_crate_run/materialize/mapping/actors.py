@@ -15,7 +15,7 @@ from ro_crate_run.events import ACTOR_NAMES, ACTOR_TYPES, crate_actor_id, engine
 from ro_crate_run.ids import software_entity_id
 from ro_crate_run.models import RunModel
 
-from ._helpers import strip_none
+from ._helpers import software_application, strip_none
 
 
 def build_actors(model: RunModel) -> list[dict[str, Any]]:
@@ -108,5 +108,5 @@ def build_software(model: RunModel) -> list[dict[str, Any]]:
             continue
         tool = os.path.basename(cmd.argv[0])
         sid = software_entity_id(tool)
-        entities.setdefault(sid, {"@id": sid, "@type": "SoftwareApplication", "name": tool})
+        entities.setdefault(sid, software_application(tool))
     return list(entities.values())

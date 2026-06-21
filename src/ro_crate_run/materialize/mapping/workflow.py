@@ -16,7 +16,7 @@ from ro_crate_run.events import crate_actor_id, engine_actor_id
 from ro_crate_run.ids import IdMap, file_ref, software_entity_id
 from ro_crate_run.models import CommandRecord, RunModel
 
-from ._helpers import STEP_STATUS_URI, ref
+from ._helpers import STEP_STATUS_URI, fragment_id, property_value, ref
 from .parameters import workflow_formal_parameters
 
 
@@ -185,7 +185,7 @@ def build_workflow_timeline(
     entities: list[dict[str, Any]] = []
     step_refs: list[dict[str, str]] = []
     for position, (action_id, name) in enumerate(ordered_actions, start=1):
-        step_id = f"#wfstep/{position}"
+        step_id = fragment_id("wfstep", position)
         entities.append({
             "@id": step_id,
             "@type": "HowToStep",
@@ -193,7 +193,7 @@ def build_workflow_timeline(
             "position": position,
         })
         entities.append({
-            "@id": f"#wfcontrol/{position}",
+            "@id": fragment_id("wfcontrol", position),
             "@type": "ControlAction",
             "name": f"Step {position}",
             "instrument": ref(step_id),
@@ -244,11 +244,7 @@ def build_steps(model: RunModel, idmap: IdMap) -> list[dict[str, Any]]:
             "@id": step_entity_id,
             "@type": "HowToStep",
             "name": step_id,
-            "additionalProperty": {
-                "@type": "PropertyValue",
-                "propertyID": "status",
-                "value": status,
-            },
+            "additionalProperty": property_value(None, status, property_id="status"),
         }
         step_cmd: CommandRecord | None = cmd_by_step.get(step_id)
         if step_cmd and step_cmd.argv:

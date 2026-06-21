@@ -15,13 +15,14 @@ from typing import Any, Callable
 
 from ro_crate_run import constants
 from ro_crate_run.events import crate_actor_id
-from ro_crate_run.ids import IdMap, file_ref, relative_file_id, software_entity_id
+from ro_crate_run.ids import file_ref, relative_file_id, software_entity_id
 from ro_crate_run.models import CommandRecord, RunModel
 
 from ._helpers import (
     FILE_OP_TYPE,
     _content_size,
     command_action_type,
+    ensure_software,
     fragment_id,
     ref,
     root_creative_work,
@@ -63,7 +64,6 @@ def _agent_action(
 
 def build_command_action(
     cmd: CommandRecord,
-    idmap: IdMap,
     project_dir: os.PathLike[str] | str,
     env_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -161,10 +161,7 @@ def build_file_actions(
         if emitted_file_ids is not None and rel not in emitted_file_ids:
             continue
         tool = str(fa.get("tool_name") or "editor")
-        tool_id = software_entity_id(tool)
-        if tool_id not in seen_tools:
-            seen_tools.add(tool_id)
-            entities.append({"@id": tool_id, "@type": "SoftwareApplication", "name": tool})
+        tool_id = ensure_software(tool, seen_tools, entities)
         op = str(fa.get("op", "modified"))
         action = _agent_action(
             fragment_id("file-action", fa.get("sequence")),
@@ -189,10 +186,7 @@ def build_raw_command_actions(model: RunModel) -> list[dict[str, Any]]:
         if not command:
             continue
         argv0 = os.path.basename(command.split()[0])
-        tool_id = software_entity_id(argv0)
-        if tool_id not in seen_tools:
-            seen_tools.add(tool_id)
-            entities.append({"@id": tool_id, "@type": "SoftwareApplication", "name": argv0})
+        tool_id = ensure_software(argv0, seen_tools, entities)
         entities.append(
             _agent_action(
                 fragment_id("raw-command", rc.get("sequence")),

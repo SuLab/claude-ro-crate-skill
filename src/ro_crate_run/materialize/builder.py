@@ -18,11 +18,11 @@ from ro_crate_run import __version__ as _rcr_version
 from ro_crate_run.clock import utc_now
 from ro_crate_run.constants import (
     DEFAULT_LICENSE,
+    EXTRA_CONFORMS_TO_LABELS,
     PROFILES,
     RO_CRATE_CONTEXT,
     RO_CRATE_SPEC_URI,
     ROOT_DATASET_ID,
-    WORKFLOW_RO_CRATE_URI,
     WORKFLOW_RUN_CONTEXT,
     is_web_id,
 )
@@ -31,10 +31,12 @@ from ro_crate_run.ids import IdMap, relative_file_id
 from ro_crate_run.journal import EventWriter
 from ro_crate_run.models import LastCheckpoint, RcrConfig, RunModel, strip_none
 from ro_crate_run.state import load_config, load_state, read_events, write_state
+from ro_crate_run.validation.graphview import types_of
 from ro_crate_run.validation.validator import validate_run
 
+from . import mapping
 from .files import FilePlan, log_should_copy, plan_file_inclusion
-from .mapping._helpers import property_value, ref, root_ref
+from .mapping._helpers import fragment_id, property_value, ref, root_ref
 from .run_model import build_run_model
 
 
@@ -240,12 +242,9 @@ def _emit_scaffold(ctx: _WriteCtx) -> None:
     )
     if model.aborted:
         # Surface an aborted run on the crate root so a consumer can tell it ended early.
-        # Carries propertyID but no name, so it is open-coded rather than via property_value.
-        root["additionalProperty"] = {
-            "@type": "PropertyValue",
-            "propertyID": "run-status",
-            "value": "aborted",
-        }
+        root["additionalProperty"] = property_value(
+            None, "aborted", property_id="run-status"
+        )
     graph.extend(
         [
             descriptor,
@@ -274,12 +273,6 @@ def _emit_scaffold(ctx: _WriteCtx) -> None:
     # link to a contextual Profile entity (RO-Crate 1.2 MUST).
     spec = PROFILES.get(model.selected_profile)
     if spec is not None and spec.is_workflow_like:
-        # Display names for the extra Profile contextual entities, keyed by the URIs the
-        # registry declares as this profile's extra conformance.
-        profile_labels = {
-            PROFILES["process"].uri: "Process Run Crate",
-            WORKFLOW_RO_CRATE_URI: "Workflow RO-Crate",
-        }
         for uri in spec.extra_conformsTo:
             if ref(uri) not in root["conformsTo"]:
                 root["conformsTo"].append(ref(uri))
@@ -287,7 +280,9 @@ def _emit_scaffold(ctx: _WriteCtx) -> None:
                 {
                     "@id": uri,
                     "@type": ["CreativeWork", "Profile"],
-                    "name": profile_labels[uri],
+                    # Display name from the registry, so an added extra_conformsTo URI
+                    # is one registry edit rather than a builder-local dict update.
+                    "name": EXTRA_CONFORMS_TO_LABELS[uri],
                 }
             )
 
@@ -299,8 +294,6 @@ def _emit_context_entities(ctx: _WriteCtx) -> None:
     entities (git state + diff, environment, containers, dependency manifests) from root
     mentions, and copies any context File artifacts into the crate so their relative @ids
     correspond to present files."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     root = ctx.root
     model = ctx.model
@@ -328,9 +321,7 @@ def _emit_context_entities(ctx: _WriteCtx) -> None:
     # links the now-present files.
     for ctx_entity in context_entities:
         cid = ctx_entity.get("@id")
-        types = ctx_entity.get("@type")
-        type_list = types if isinstance(types, list) else [types]
-        if not isinstance(cid, str) or "File" not in {str(t) for t in type_list}:
+        if not isinstance(cid, str) or "File" not in types_of(ctx_entity):
             continue
         if cid.startswith("#") or is_web_id(cid):
             continue
@@ -343,8 +334,6 @@ def _emit_parameters(ctx: _WriteCtx) -> None:
 
     Stashes the produced formal-parameter map on ctx (file emitters key descriptions off it),
     and plans file inclusion now so the declared-files and command emitters share one plan set."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     root = ctx.root
     model = ctx.model
@@ -366,8 +355,6 @@ def _emit_declared_files(ctx: _WriteCtx) -> None:
     Included files are linked from hasPart; a declared input that policy does not copy is still
     referenced from mentions so the user's explicitly-declared input is never an orphan. Seeds
     the cross-section ctx.file_ids accumulator."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     root = ctx.root
     crate_dir = ctx.crate_dir
@@ -396,8 +383,6 @@ def _emit_workflow(ctx: _WriteCtx) -> list[dict[str, Any]]:
     Returns the workflow entities so the synthetic-step weave can attach steps to them. A
     synthesized workflow is referenced via mainEntity only (it is abstract, not a data file);
     a real workflow file is additionally linked from hasPart."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     root = ctx.root
     model = ctx.model
@@ -426,8 +411,6 @@ def _emit_workflow(ctx: _WriteCtx) -> list[dict[str, Any]]:
 
 def _emit_steps(ctx: _WriteCtx) -> None:
     """Emit declared steps (HowToStep + ControlAction)."""
-    from ro_crate_run.materialize import mapping
-
     ctx.graph.extend(mapping.build_steps(ctx.model, ctx.id_map))
 
 
@@ -436,23 +419,18 @@ def _emit_agent_actions(ctx: _WriteCtx) -> None:
 
     SoftwareApplication/File/Dataset entities are referenced by the actions, so they are not
     mentioned directly from the root; every other emitted action is added to mentions."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     root = ctx.root
     agent_action_entities = mapping.build_agent_actions(ctx.model, ctx.project_dir, ctx.file_ids)
     graph.extend(agent_action_entities)
     for e in agent_action_entities:
-        types = e["@type"] if isinstance(e["@type"], list) else [e["@type"]]
         # SoftwareApplication/File are referenced by the actions, not mentioned directly.
-        if not any(str(t) in {"SoftwareApplication", "File", "Dataset"} for t in types):
+        if not ({"SoftwareApplication", "File", "Dataset"} & set(types_of(e))):
             root["mentions"].append(ref(e["@id"]))
 
 
 def _emit_notes_and_connections(ctx: _WriteCtx) -> None:
     """Emit notes/decisions and parameter-connection entities, each referenced from mentions."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     root = ctx.root
     model = ctx.model
@@ -549,11 +527,8 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
     every command output (hasPart) and referenced input (mentions-only) has a File entity,
     reusing a matching FilePlan when present and otherwise emitting a minimal fallback. Uses
     and updates the cross-command ctx.file_ids accumulator."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     root = ctx.root
-    id_map = ctx.id_map
     project_dir = ctx.project_dir
     crate_dir = ctx.crate_dir
     cfg = ctx.cfg
@@ -562,7 +537,7 @@ def _emit_command_file_entities(ctx: _WriteCtx, command: Any) -> None:
     file_ids = ctx.file_ids
     max_hash_bytes = ctx.max_hash_bytes
 
-    entities = mapping.build_command_action(command, id_map, project_dir)
+    entities = mapping.build_command_action(command, project_dir)
     graph.extend(entities)
     # Reference the action AND its sidecar/log File entities from the root so the
     # command's invocation record + logs are reachable (they carry about->action, but
@@ -620,8 +595,6 @@ def _weave_synthetic_workflow_steps(
     When the workflow is synthesized (no external definition file) and the agent did not
     declare explicit rcr steps, the workflow's steps ARE the agent's execution-shaped
     actions (commands + file edits + raw commands + subagent dispatches) in time order."""
-    from ro_crate_run.materialize import mapping
-
     graph = ctx.graph
     model = ctx.model
     if workflow_entities and model.workflow and model.workflow.get("synthetic") and not model.steps:
@@ -666,9 +639,7 @@ def _ensure_data_entities_in_haspart(graph: list[dict[str, Any]], root: dict[str
             continue
         if is_web_id(entity_id):
             continue
-        types = entity.get("@type")
-        type_list = types if isinstance(types, list) else [types]
-        if not any(str(t) in {"File", "Dataset"} for t in type_list):
+        if not ({"File", "Dataset"} & set(types_of(entity))):
             continue
         has_part.append(ref(entity_id))
         present.add(entity_id)
@@ -711,7 +682,7 @@ def _build_tool_decisions(model: RunModel) -> list[dict[str, Any]]:
             continue
         timestamp = decision.get("timestamp")
         tool = str(decision.get("tool") or "")
-        decision_id = f"#tool-decision/{seq}"
+        decision_id = fragment_id("tool-decision", seq)
         if tool == "AskUserQuestion":
             question = decision.get("question")
             options = decision.get("options") or []

@@ -18,6 +18,7 @@ from .constants import DETERMINISTIC_ZIP_EPOCH
 from .fs import write_json
 from .journal import EventWriter
 from .materialize.builder import checkpoint
+from .redaction import iter_regular_files
 from .state import load_state
 from .validation.validator import validate_run
 
@@ -91,7 +92,15 @@ def finalize(
     ships and ``run.export.blocked`` is recorded; otherwise the summary is
     written, the manifest is optionally signed, and the crate is optionally
     zipped. Returns 0 on success, non-zero when the gate or signing fails.
+
+    ``out`` names the archive destination and only applies when a zip is
+    produced. Passing ``out`` implies ``zip_output``: a caller naming an output
+    path always wants an archive there, so requesting one without ``zip_output``
+    is treated as a zip request rather than silently doing nothing.
     """
+    # An explicit out= path is a zip request; honor it without requiring --zip.
+    if out is not None:
+        zip_output = True
     state = load_state(state_dir)
     if state.dirty or not state.last_checkpoint:
         checkpoint(
@@ -121,9 +130,9 @@ def finalize(
             },
         )
         _emit_finalized_events(state_dir, public=public, zip_output=zip_output)
-        # test_spec_closure.py::test_include_event_journal_places_journal_in_private_zip
-        # asserts the journal at ro-crate/.ro-crate-run/events.ndjson for private crates,
-        # so persist it into the canonical crate dir alongside the staged copy.
+        # A private (non-public) crate exported with --include-event-journal must carry
+        # its journal at ro-crate/.ro-crate-run/events.ndjson; the staged copy is torn
+        # down on exit, so persist the journal into the canonical crate dir to keep it.
         if include_event_journal and not public:
             canon = state_dir / "ro-crate" / ".ro-crate-run" / "events.ndjson"
             canon.parent.mkdir(parents=True, exist_ok=True)
@@ -160,17 +169,17 @@ def export_zip(crate_dir: Path, out_path: Path, include_event_journal: bool = Fa
     default.
     """
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(crate_dir.rglob("*")):
-            if path.is_file():
-                rel = path.relative_to(crate_dir).as_posix()
-                if not include_event_journal and rel.endswith("events.ndjson"):
-                    continue
-                info = zipfile.ZipInfo(rel)
-                # Fixed timestamp so identical crates produce byte-identical zips.
-                info.date_time = DETERMINISTIC_ZIP_EPOCH
-                info.external_attr = 0o644 << 16
-                # writestr honors the ZipInfo's own compress_type (defaults to STORED),
-                # not the ZipFile-level compression — set it so entries are deflated.
-                info.compress_type = zipfile.ZIP_DEFLATED
-                archive.writestr(info, path.read_bytes())
+        # iter_regular_files is the one canonical sorted, regular-files-only walk.
+        for path in iter_regular_files(crate_dir):
+            rel = path.relative_to(crate_dir).as_posix()
+            if not include_event_journal and rel.endswith("events.ndjson"):
+                continue
+            info = zipfile.ZipInfo(rel)
+            # Fixed timestamp so identical crates produce byte-identical zips.
+            info.date_time = DETERMINISTIC_ZIP_EPOCH
+            info.external_attr = 0o644 << 16
+            # writestr honors the ZipInfo's own compress_type (defaults to STORED),
+            # not the ZipFile-level compression — set it so entries are deflated.
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, path.read_bytes())
     return out_path

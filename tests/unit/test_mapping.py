@@ -119,7 +119,6 @@ def test_build_software_covers_instruments(tmp_path: Path) -> None:
 
 
 def test_build_command_action_resolves_instrument(tmp_path: Path) -> None:
-    idmap = IdMap(tmp_path)
     cmd = _cmd(
         outputs=["results/out.txt"],
         terminal_status="completed",
@@ -128,7 +127,7 @@ def test_build_command_action_resolves_instrument(tmp_path: Path) -> None:
         stdout_log=".ro-crate-run/logs/cmd_000001.stdout.txt",
         sidecar=".ro-crate-run/commands/cmd_000001.json",
     )
-    entities = mapping.build_command_action(cmd, idmap, Path("/proj"))
+    entities = mapping.build_command_action(cmd, Path("/proj"))
     action = entities[0]
     assert action["@type"] == "CreateAction"
     assert action["instrument"] == {"@id": software_entity_id("python3")}
@@ -146,9 +145,7 @@ def test_build_command_action_failure_has_error() -> None:
         exit_code=2,
         ended_at="2026-06-17T00:01:00.000000Z",
     )
-    action = mapping.build_command_action(
-        cmd, IdMap(Path("/tmp/x_idmap_nonexistent")), Path("/proj")
-    )[0]
+    action = mapping.build_command_action(cmd, Path("/proj"))[0]
     assert action["actionStatus"] == {"@id": "http://schema.org/FailedActionStatus"}
     assert "exited with code 2" in action["error"]
 
@@ -297,7 +294,7 @@ def test_build_steps_dangling_free(tmp_path: Path) -> None:
         mapping.build_actors(model)
         + mapping.build_steps(model, idmap)
         + mapping.build_software(model)
-        + mapping.build_command_action(model.commands[0], idmap, Path("/proj"))
+        + mapping.build_command_action(model.commands[0], Path("/proj"))
     )
     assert_no_dangling_refs(graph)
 

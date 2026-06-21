@@ -193,8 +193,9 @@ def test_require_date_published_toggles_finding(tmp_path: Path, monkeypatch) -> 
 # hash_policy.max_file_size_mb — a file larger than the limit gets a
 # hash-status=not-hashed additionalProperty instead of an sha256 identifier.
 #
-# (hash_policy.hash_large_files is asserted dead in test_dead_flags; the live
-# hashing gate is purely max_file_size_mb.)
+# hash_policy.hash_large_files lifts that gate (HashPolicy.max_hash_bytes returns
+# sys.maxsize when set); test_hash_large_files_* exercise it on the checkpoint,
+# runner-snapshot, and `rcr input` paths.
 # ---------------------------------------------------------------------------
 
 
@@ -323,6 +324,68 @@ def test_hash_large_files_overrides_size_gate(tmp_path: Path, monkeypatch) -> No
     entity = _by_id(graph)["big.bin"]
     assert (resolve_ref(entity.get("identifier"), graph) or {}).get("propertyID") == "sha256", \
         f"hash_large_files did not override the size gate: {entity}"
+
+
+def _declared_inputs(state_dir: Path) -> list[dict]:
+    """The payloads of every workflow.input.declared event in the journal."""
+    return [
+        json.loads(line)["payload"]
+        for line in (state_dir / "events.ndjson").read_text().splitlines()
+        if line.strip() and json.loads(line)["event_type"] == "workflow.input.declared"
+    ]
+
+
+def test_hash_large_files_lifts_input_hash_gate(tmp_path: Path, monkeypatch) -> None:
+    # FIX: `rcr input` hashed inline through `cfg.hash_policy.max_hash_bytes()`, which
+    # honors hash_large_files — previously it re-derived the raw size cap and ignored the
+    # flag, so an oversized declared input was never hashed even with the flag set.
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Demo", "--no-checkpoint"]) == 0
+    (tmp_path / "in.bin").write_bytes(b"x" * 200_000)
+
+    # Size gate at 0 MB: the oversized input is NOT hashed inline (no sha256 in the event).
+    assert main(["config", "hash_policy.max_file_size_mb", "0"]) == 0
+    assert main(["input", "in.bin", "--required"]) == 0
+    first = _declared_inputs(tmp_path / ".ro-crate-run")[-1]
+    assert first["existence"] == "observed local"
+    assert "sha256" not in first, "size gate should have skipped the inline input hash"
+
+    # hash_large_files=True lifts the cap, so the same input is now hashed inline.
+    assert main(["config", "hash_policy.hash_large_files", "true"]) == 0
+    assert main(["input", "in.bin", "--required"]) == 0
+    second = _declared_inputs(tmp_path / ".ro-crate-run")[-1]
+    assert second["sha256"], "hash_large_files did not lift the input-hash size cap"
+    assert second["size"] == 200_000
+
+
+def test_config_coerces_value_to_declared_field_type(tmp_path: Path, monkeypatch) -> None:
+    # FIX: `rcr config` now coerces the CLI string to the field's declared type, so a
+    # list field is split on commas and a non-integer is rejected at the write boundary
+    # instead of corrupting the typed config field with a raw string.
+    monkeypatch.chdir(tmp_path)
+    assert main(["start", "Demo", "--no-checkpoint"]) == 0
+
+    # list[str] field: a comma string is split into a real list, not stored verbatim.
+    assert main(["config", "output_roots", "a,b,c"]) == 0
+    cfg = json.loads((_state_dir() / "config.json").read_text())
+    assert cfg["output_roots"] == ["a", "b", "c"]
+
+    # int field: a non-integer is rejected (exit 1) rather than stored as a string.
+    assert main(["config", "remote_journal.timeout_seconds", "5x"]) == 1
+    cfg = json.loads((_state_dir() / "config.json").read_text())
+    assert cfg["remote_journal"]["timeout_seconds"] == 5  # unchanged default
+    # A valid int still coerces correctly.
+    assert main(["config", "remote_journal.timeout_seconds", "30"]) == 0
+    cfg = json.loads((_state_dir() / "config.json").read_text())
+    assert cfg["remote_journal"]["timeout_seconds"] == 30
+
+    # bool field: a non-bool is rejected; the currently-valid scalar set still works.
+    assert main(["config", "hash_policy.hash_large_files", "maybe"]) == 1
+    assert main(["config", "hash_policy.hash_large_files", "true"]) == 0
+    assert main(["config", "copy_mode", "reference"]) == 0  # str field unchanged
+    cfg = json.loads((_state_dir() / "config.json").read_text())
+    assert cfg["hash_policy"]["hash_large_files"] is True
+    assert cfg["copy_mode"] == "reference"
 
 
 # ---------------------------------------------------------------------------

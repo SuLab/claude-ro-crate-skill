@@ -15,6 +15,7 @@ from ro_crate_run.models import RunModel
 
 from ._helpers import (
     _content_size,
+    fragment_id,
     property_value,
     ref,
     root_creative_work,
@@ -70,7 +71,7 @@ def build_environment(model: RunModel) -> list[dict[str, Any]]:
     if not isinstance(env_vars, dict):
         return []
     return [
-        {"@id": f"#env/{name}", **property_value(name, str(value))}
+        {"@id": fragment_id("env", name), **property_value(name, str(value))}
         for name, value in sorted(env_vars.items())
     ]
 
@@ -98,7 +99,7 @@ def build_containers(model: RunModel) -> list[dict[str, Any]]:
     for idx, container in enumerate(model.containers, start=1):
         digest = bare_sha256(str(container.get("digest", "")))
         entity = {
-            "@id": f"#container/{idx}",
+            "@id": fragment_id("container", idx),
             "@type": "ContainerImage",
             # ContainerImage SHOULD list additionalType (a workflow-run namespace URI)
             # alongside registry + name (Process/Workflow 0.5 SHOULD).
@@ -155,7 +156,7 @@ def build_notes_decisions(model: RunModel) -> list[dict[str, Any]]:
         if note.get("visibility") == "public":
             entities.append(
                 root_creative_work(
-                    f"#note/{idx}", f"Public note {idx}", note.get("text", "")
+                    fragment_id("note", idx), f"Public note {idx}", note.get("text", "")
                 )
             )
     for idx, decision in enumerate(model.decisions, start=1):
@@ -165,7 +166,7 @@ def build_notes_decisions(model: RunModel) -> list[dict[str, Any]]:
             )
             entities.append(
                 root_creative_work(
-                    f"#decision/{idx}",
+                    fragment_id("decision", idx),
                     f"Decision {idx}",
                     decision.get("text", ""),
                     description=description,

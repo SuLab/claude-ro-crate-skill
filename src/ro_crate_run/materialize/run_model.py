@@ -8,28 +8,19 @@ from pathlib import Path
 from typing import Any
 
 from ro_crate_run import adapters
-from ro_crate_run.constants import COMMAND_TERMINAL_EVENTS, STEP_TERMINAL_EVENTS
+from ro_crate_run.constants import (
+    COMMAND_TERMINAL_EVENTS,
+    STEP_TERMINAL_EVENTS,
+    SUBAGENT_EVENT_TYPES,
+)
 from ro_crate_run.events import event_from_dict
 from ro_crate_run.models import CommandRecord, RcrEvent, RunModel
 from ro_crate_run.state import load_state, read_events
 
 # A projector folds one event into the model. It mutates `model` in place and may
 # read/update the shared `commands_by_id` fold (the only cross-event state). Projectors
-# are dispatched in event-iteration order, so the started-before-terminal command fold
-# is preserved exactly as in the original sequential elif-ladder.
+# run in event-iteration order, so a command's started fold is seen before its terminal.
 Projector = Callable[["RunModel", "RcrEvent", "dict[str, CommandRecord]"], None]
-
-# Subagent/Task lifecycle events folded (one reduced record per task) into
-# agent_activity.subagents. Shared with profiles.py, which counts the raw lifecycle
-# events (not the collapsed records) so its structured-workflow heuristic is unchanged.
-SUBAGENT_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        "agent.task.created",
-        "agent.task.completed",
-        "agent.subagent.started",
-        "agent.subagent.completed",
-    }
-)
 
 
 def build_run_model(state_dir: Path, through_sequence: int | None = None) -> RunModel:
@@ -62,9 +53,9 @@ def build_run_model(state_dir: Path, through_sequence: int | None = None) -> Run
         if projector is not None:
             projector(model, event, commands_by_id)
     model.commands = list(commands_by_id.values())
-    # Collapse the raw per-event subagent/tool folds into reduced records BEFORE profile
-    # selection; profiles.py counts the raw lifecycle events (model.events), not the
-    # collapsed records, so its structured-workflow heuristic is unaffected.
+    # Collapse the raw per-event subagent/tool folds into reduced records before profile
+    # selection. Profile promotion counts the raw lifecycle events (model.events); the
+    # mapping builders consume the collapsed records.
     _collapse_agent_activity(model)
     from .profiles import apply_selection, synthesize_workflow
     apply_selection(model, state.requested_profile)
@@ -215,9 +206,10 @@ def _reduce_step_identified(
 
 def _command_argv(payload: dict[str, Any]) -> list[str]:
     """argv for a command record. Real `rcr run` payloads always carry argv; an imported
-    Action carries none, so fall back to the display command (then a generic token) — this
-    keeps the action's instrument basename resolvable to an emitted #software/* entity
-    rather than dangling on #software/unknown, while leaving real commands byte-identical."""
+    Action carries none, so fall back to the display command (then a generic token). The
+    fallback only fires for imported actions lacking argv, and keeps the action's instrument
+    basename resolvable to an emitted #software/* entity rather than dangling on
+    #software/unknown."""
     argv = list(payload.get("argv", []))
     if argv:
         return argv

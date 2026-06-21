@@ -1,12 +1,10 @@
 """Host- and filesystem-inspection helpers behind ``rcr software`` / ``rcr input``:
 probe an executable's version, scan the project for dependency/workflow manifests,
-and classify a declared path's existence. Split out of the CLI handler layer so
-each is unit-testable without going through the command dispatch."""
+and classify a declared path's existence."""
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 
 from . import adapters
@@ -14,6 +12,7 @@ from .constants import CONTAINER_MANIFESTS, DEPENDENCY_MANIFESTS
 from .context import ProjectContext
 from .fs import sha256_file
 from .journal import EventWriter
+from .proc import run_capture
 
 # Workflow-definition suffixes scanned by glob. ``.cwl`` is recognized by the
 # adapter registry (its ``kind`` tag derives from the engine name); ``.wdl`` is a
@@ -84,14 +83,11 @@ def probe_software(command_or_name: str) -> tuple[str | None, str | None]:
     executable = shutil.which(command_or_name)
     version = None
     if executable:
-        proc = subprocess.run(
-            [executable, "--version"],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
-        output = (proc.stdout or proc.stderr).strip()
-        if output:
-            version = output.splitlines()[0]
+        # run_capture returns None on nonzero exit / OSError / TimeoutExpired, so a hung
+        # or failing `--version` degrades to "no version" instead of raising.
+        proc = run_capture([executable, "--version"], timeout=5)
+        if proc is not None:
+            output = (proc.stdout or proc.stderr).strip()
+            if output:
+                version = output.splitlines()[0]
     return version, executable

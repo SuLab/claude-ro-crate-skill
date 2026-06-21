@@ -40,7 +40,7 @@ def _public_by_default() -> bool:
     """Read ``privacy.public_by_default`` for the current project, defaulting to False.
 
     Degrades to False when no config exists yet (e.g. outside an active run) so an
-    unflagged ``note``/``decision`` stays private, preserving prior behavior.
+    unflagged ``note``/``decision`` stays private.
     """
     from .context import ProjectContext
     from .state import load_config
@@ -231,9 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     p = sub.add_parser("inspect")
-    # One view per call: a shared 'format' dest makes conflicting selectors an
-    # argparse error and gives the previously-dead --crate a real meaning (the
-    # default crate view), instead of branch-order precedence among store_true flags.
+    # One view per call: a shared 'format' dest makes conflicting selectors an argparse
+    # error, and --crate selects the default crate view (the same as passing no selector).
     fmt = p.add_mutually_exclusive_group()
     fmt.add_argument("--events", dest="format", action="store_const", const="events")
     fmt.add_argument("--crate", dest="format", action="store_const", const="crate")

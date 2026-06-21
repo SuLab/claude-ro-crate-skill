@@ -14,6 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from .constants import (
+    LEVEL_JOURNAL,
+    LEVEL_PRIVACY,
+    LEVEL_ROCRATE,
+    LEVEL_STATE,
+)
 from .context import ProjectContext
 from .journal import EventWriter
 from .models import RcrConfig, RcrState, ValidationReport
@@ -237,7 +243,7 @@ def _on_stop(
     report = validate_run(ctx.state_dir, public=False, append_event=False)
     public_report = validate_run(ctx.state_dir, public=True, append_event=False)
     public_findings = [
-        finding.message for finding in public_report.errors if finding.level == "privacy"
+        finding.message for finding in public_report.errors if finding.level == LEVEL_PRIVACY
     ]
     raw_bypass = _detect_raw_bash_bypass(read_events(ctx.state_dir))
     state = load_state(ctx.state_dir)
@@ -384,8 +390,9 @@ _REQUIRED_METADATA_CODES = {
     "missing_software_versions",
 }
 # Validation levels whose errors are critical structural failures (corrupt journal,
-# bad state, invalid JSON-LD / RO-Crate) and so block in monitored mode too.
-_BLOCKING_VALIDATION_LEVELS = {"journal", "state", "ro_crate"}
+# bad state, invalid JSON-LD / RO-Crate) and so block in monitored mode too. Named off
+# the constants so a level rename can't silently stop the Stop hook from blocking on them.
+_BLOCKING_VALIDATION_LEVELS = {LEVEL_JOURNAL, LEVEL_STATE, LEVEL_ROCRATE}
 
 
 def _stop_blockers(

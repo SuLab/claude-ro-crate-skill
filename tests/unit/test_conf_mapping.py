@@ -302,7 +302,7 @@ def test_l4_raw_command_object_is_root_dataset() -> None:
 def test_l5_command_action_environment_refs(tmp_path: Path) -> None:
     cmd = _cmd(argv=["python3", "x.py"], outputs=["out.txt"], terminal_status="completed")
     ents = mapping.build_command_action(
-        cmd, IdMap(tmp_path), tmp_path, env_ids=["#env/SEED", "#env/THREADS"]
+        cmd, tmp_path, env_ids=["#env/SEED", "#env/THREADS"]
     )
     action = ents[0]
     assert action["environment"] == [{"@id": "#env/SEED"}, {"@id": "#env/THREADS"}]
@@ -310,7 +310,7 @@ def test_l5_command_action_environment_refs(tmp_path: Path) -> None:
 
 def test_l5_no_env_ids_omits_environment(tmp_path: Path) -> None:
     cmd = _cmd(terminal_status="completed", outputs=["out.txt"])
-    action = mapping.build_command_action(cmd, IdMap(tmp_path), tmp_path)[0]
+    action = mapping.build_command_action(cmd, tmp_path)[0]
     assert "environment" not in action
 
 
@@ -328,7 +328,7 @@ def test_l8aux_sidecar_log_content_size(tmp_path: Path) -> None:
         sidecar="sidecar.json",
         stdout_log="stdout.txt",
     )
-    ents = mapping.build_command_action(cmd, IdMap(tmp_path), tmp_path)
+    ents = mapping.build_command_action(cmd, tmp_path)
     by_id = {e["@id"]: e for e in ents}
     assert by_id["sidecar.json"]["contentSize"] == str(len('{"x": 1}'))
     assert by_id["stdout.txt"]["contentSize"] == str(len("hello\n"))
@@ -336,7 +336,7 @@ def test_l8aux_sidecar_log_content_size(tmp_path: Path) -> None:
 
 def test_l8aux_missing_sidecar_file_omits_content_size(tmp_path: Path) -> None:
     cmd = _cmd(terminal_status="completed", outputs=["out.txt"], sidecar="absent.json")
-    ents = mapping.build_command_action(cmd, IdMap(tmp_path), tmp_path)
+    ents = mapping.build_command_action(cmd, tmp_path)
     sidecar = next(e for e in ents if e["@id"] == "absent.json")
     assert "contentSize" not in sidecar
 

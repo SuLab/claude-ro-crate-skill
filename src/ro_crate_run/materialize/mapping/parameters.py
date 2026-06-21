@@ -16,6 +16,7 @@ from ro_crate_run.models import RunModel
 from ._helpers import (
     _FORMAL_PARAMETER_PROFILE,
     _formal_parameter_profile_entity,
+    fragment_id,
     property_value,
     ref,
 )
@@ -26,8 +27,8 @@ def build_parameters(model: RunModel) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     for parameter in model.parameters:
         name = str(parameter.get("name", "parameter"))
-        formal_id = str(parameter.get("formal_parameter") or f"#param/{name}")
-        value_id = f"#param-value/{name}"
+        formal_id = str(parameter.get("formal_parameter") or fragment_id("param", name))
+        value_id = fragment_id("param-value", name)
         entities.append(
             {
                 "@id": formal_id,
@@ -68,7 +69,7 @@ def workflow_formal_parameters(
             if not path or path == wf_path or item.get("role") in {"workflow-definition", "config"}:
                 # config-role files are plain File entities only, no FormalParameter.
                 continue
-            fp_id = f"#formal/{kind}/{os.path.basename(path)}"
+            fp_id = fragment_id("formal", f"{kind}/{os.path.basename(path)}")
             path_map[path] = fp_id
             params.append(
                 {
@@ -94,7 +95,7 @@ def build_parameter_connections(model: RunModel) -> list[dict[str, Any]]:
         if isinstance(conn, dict) and conn.get("source") and conn.get("target"):
             entities.append(
                 {
-                    "@id": f"#connection/{idx}",
+                    "@id": fragment_id("connection", idx),
                     "@type": "ParameterConnection",
                     "sourceParameter": ref(str(conn["source"])),
                     "targetParameter": ref(str(conn["target"])),
