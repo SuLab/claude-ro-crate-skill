@@ -16,6 +16,7 @@ from typing import Any, cast
 
 from filelock import FileLock
 
+from .clock import utc_now
 from .constants import EVENT_TYPES, dirty_effect
 from .events import (
     ACTOR_NAMES,
@@ -29,7 +30,6 @@ from .events import (
 )
 from .models import Actor, RcrEvent
 from .state import load_config, load_state, write_state
-from .time import utc_now
 
 
 class EventWriter:

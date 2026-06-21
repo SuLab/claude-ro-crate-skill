@@ -18,9 +18,9 @@ from dataclasses import asdict
 from typing import Any
 
 from . import __version__
+from .clock import utc_now
 from .constants import EVENT_SCHEMA_VERSION
 from .models import Actor, EventSource, RcrEvent
-from .time import utc_now
 
 # Display names and @type for each actor role. Single source of truth for both
 # the event-level (actor:<role>) and crate-level (#actor/<role>) id namespaces.

@@ -13,12 +13,12 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from .clock import utc_now, utc_now_compact
 from .events import dump_event_line, event_from_dict, event_to_dict
 from .journal import EventWriter
 from .models import RcrEvent
 from .redaction import Redactor, iter_regular_files, scan_file_for_secrets
 from .state import read_events
-from .time import utc_now, utc_now_compact
 
 
 def redact_run(state_dir: Path, *, apply: bool = False, policy: Path | str | None = None) -> int:

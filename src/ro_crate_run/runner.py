@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now
 from .constants import BYTES_PER_MB, SIDECAR_SCHEMA_VERSION, STARTUP_EXIT_CODE
 from .fs import file_record
 from .git import observe_git_state
@@ -21,7 +22,6 @@ from .journal import EventWriter
 from .models import RedactionResult
 from .redaction import Redactor, redaction_event_payload
 from .state import load_config, load_state
-from .time import utc_now
 
 
 class CommandRunner:

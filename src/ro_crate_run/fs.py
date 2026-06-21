@@ -8,7 +8,7 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-from . import time
+from . import clock
 
 # The digest prefix that distinguishes a sha256 hex string in records and crate entities.
 _SHA256_PREFIX = "sha256:"
@@ -82,7 +82,7 @@ def file_record(path: Path, project_root: Path, max_hash_bytes: int) -> dict[str
         "exists": True,
         "kind": kind,
         "content_size": stat.st_size,
-        "date_modified": time.iso_utc_from_timestamp(stat.st_mtime),
+        "date_modified": clock.iso_utc_from_timestamp(stat.st_mtime),
         "encoding_format": mime or "application/octet-stream",
     }
     if kind == "file" and stat.st_size <= max_hash_bytes:

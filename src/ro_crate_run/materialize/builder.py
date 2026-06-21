@@ -15,6 +15,7 @@ from filelock import FileLock
 from rocrate.rocrate import ROCrate  # type: ignore[import-untyped]
 
 from ro_crate_run import __version__ as _rcr_version
+from ro_crate_run.clock import utc_now
 from ro_crate_run.constants import (
     DEFAULT_LICENSE,
     PROFILES,
@@ -30,7 +31,6 @@ from ro_crate_run.ids import IdMap, relative_file_id
 from ro_crate_run.journal import EventWriter
 from ro_crate_run.models import LastCheckpoint, RcrConfig, RunModel, strip_none
 from ro_crate_run.state import load_config, load_state, read_events, write_state
-from ro_crate_run.time import utc_now
 from ro_crate_run.validation.validator import validate_run
 
 from .files import FilePlan, log_should_copy, plan_file_inclusion

@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any, TypeVar, Union, cast, get_args, get_origin
 
 from . import ids
+from .clock import utc_now, utc_now_compact
 from .constants import resolve_profile
 from .fs import write_json
 from .models import JsonDict, RcrConfig, RcrState
-from .time import utc_now, utc_now_compact
 
 T = TypeVar("T")
 
