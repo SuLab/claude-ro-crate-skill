@@ -15,20 +15,20 @@
 
 - Every event must have a valid `event_hash` computed from its canonical JSON.
 - `previous_event_hash` must match the `event_hash` of the preceding event.
-- Unterminated `execution.command.started` is an ERROR unless `active_run` flag is set (then WARNING).
-- All events must have `schema_version = "1.1.0"`.
+- Unterminated `execution.command.started` is an ERROR unless the run is still active, in which case the check is skipped (no finding).
+- Every event must carry a `schema_version` field (the field's presence is checked; the value stamped by the writer is `1.1.0`).
 
 ## Level 1 — State Consistency
 
 - `state.run_id` must match all events' `run_id`.
-- `state.sequence` must equal the number of events in the journal.
-- `id-map.json` must be valid JSON and its `event_to_entity`/`path_to_entity`/`step_to_entity` sections must each be an object.
+- `state.sequence` must equal the `sequence` field of the last journal event.
+- `id-map.json` must be valid JSON and each object-valued section (`event_to_entity`, `path_to_entity`, `step_to_entity`, `profile_to_entity`, `software_to_entity`) must be a JSON object.
 
 ## Level 2 — RO-Crate Structure
 
 - `ro-crate-metadata.json` must be valid JSON.
 - The descriptor entity must have `conformsTo: https://w3id.org/ro/crate/1.2`.
-- Root entity `./` must have `name`, `description`, `datePublished`, `license`.
+- Root entity `./` must have `name`, `description`, `license` (always), and `datePublished` when `validation.require_date_published` is enabled (the default).
 - JSON-LD expansion via rdflib must not produce errors.
 
 ## Level 3 — Profile Rules
@@ -37,8 +37,7 @@
 - At least one `CreateAction` or `Action` with a valid `instrument`.
 
 **Workflow Run Crate (adds):**
-- A `ComputationalWorkflow` entity with `programmingLanguage`.
-- A workflow engine `SoftwareApplication`.
+- A `ComputationalWorkflow` entity is present and the root `mainEntity` points to it. Warnings are raised if no action uses it as `instrument`, or (when the workflow declares inputs/outputs) if no `FormalParameter` entities exist.
 
 **Provenance Run Crate (adds):**
 - At least one `HowToStep` entity.
@@ -61,7 +60,9 @@ With `--strict`: policy-gated reproducibility findings (those whose code ends in
 ## Public Release Gate Conditions (Level 5)
 
 Fails closed (blocks export) when:
-- Any event payload contains a secret regex match (token, password, key).
-- A captured file path matches a denylist pattern (`.env`, `*.pem`, `id_rsa`, etc.).
-- The embedded event journal contains a redacted-but-not-purged secret.
+- Any staged file's content contains a secret regex match (token, password, key).
+- The embedded event journal, raw prompts, source code, or git diffs are present in the staged crate (per the `privacy.*` config flags).
 - A `commands/*.json` sidecar records an environment variable not on `redaction.environment_allowlist`.
+- A full log file exceeds the configured size limit.
+
+The gate scans file content (and the conditions above); it does **not** match file paths against a denylist. Sensitive files (`.env`, `*.pem`, `id_rsa`, etc.) are excluded earlier, at capture time, by the file-inclusion policy (`_SENSITIVE_GLOBS` in `materialize/files.py`) — not by this export gate.

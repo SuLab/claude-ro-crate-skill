@@ -9,10 +9,10 @@ allowed-tools: Bash(rcr *)
 
 These operations change or release provenance irreversibly and MUST be run explicitly by a human, never auto-invoked by the model.
 
-Route invocations to the bundled CLI:
+Route invocations to the `rcr` CLI (resolved from PATH):
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/rcr $ARGUMENTS
+rcr $ARGUMENTS
 ```
 
 Supported admin operations:

@@ -1,6 +1,6 @@
 # Privacy Policy
 
-## Default Privacy Table (SPEC §13.1)
+## Default Privacy Table (SPEC §13.2)
 
 | Data class              | Default       | Override via config                    |
 |-------------------------|---------------|----------------------------------------|
@@ -12,13 +12,13 @@
 | Event journal           | private       | `finalize --include-event-journal`     |
 | Crate metadata          | public        | (always public)                        |
 
-## Redaction Rules (SPEC §13.2)
+## Redaction Rules (SPEC §13.3)
 
 - **Before persistence:** sensitive fields are redacted from event payloads before they are written to the journal (redact-before-append).
 - **Allowlist env capture:** only environment variable names on `redaction.environment_allowlist` are captured; others are dropped.
 - **Secret values:** values matching the built-in secret regexes (and `KEY=value` assignments whose key contains TOKEN/SECRET/PASSWORD/etc.) are replaced with `[REDACTED:secret]`.
 - **Regex patterns:** values matching the built-in secret regexes plus any extra regexes from `redaction.patterns_file` are replaced inline with `[REDACTED:secret]`.
-- **Never read:** `.env` files, OS keychains, SSH keys (`~/.ssh/`), cloud credential files (`~/.aws/`, `~/.gcp/`, `~/.azure/`) are never captured regardless of config.
+- **Never read:** files whose basename matches a sensitive pattern — `.env` files, SSH private keys (`id_rsa`/`id_ed25519`), and credential files (`*credentials*`, e.g. an AWS `credentials` file) — are never captured regardless of config; OS keychains and files outside the project root are never read.
 
 ## Redaction Journal
 
@@ -32,10 +32,9 @@ When redaction is applied with `rcr redact --apply`:
 The `finalize --public` command runs Level-5 validation AFTER staging all files (including any embedded event journal). Export is blocked when:
 
 1. Any staged event payload or file contains a secret-pattern match.
-2. A denylist filename is present in the staged tree.
-3. A `commands/*.json` sidecar records an environment variable not on `redaction.environment_allowlist`.
-4. Any `redacted: true` event is included without the redaction having been applied.
-5. `privacy.require_privacy_gate` is true and the gate check was not run.
+2. A `commands/*.json` sidecar records an environment variable not on `redaction.environment_allowlist`.
+
+The L5 gate only runs when `validation.require_privacy_gate` is true (the default); setting it false skips the gate entirely.
 
 On gate failure, the staged tree is discarded and a `run.export.blocked` event is emitted.
 
@@ -43,6 +42,6 @@ On gate failure, the staged tree is discarded and a `run.export.blocked` event i
 
 - `.env`, `.env.*`, `*.env`
 - `*.pem`, `*.key`, `id_rsa`, `id_ed25519`, `*.p12`, `*.pfx`
-- `~/.ssh/**`, `~/.aws/**`, `~/.gcp/**`, `~/.azure/**`
-- `*credentials*`, `*secret*`, `*token*` (filename matching, case-insensitive)
-- Any file listed in `.gitignore` with a `!` exception is still subject to denylist check.
+- `*credentials*`, `*secret*`, `*token*`
+
+Matching is against the file's basename only (lowercased), not its path: a file inside `~/.ssh`, `~/.aws`, etc. is excluded only if its basename matches one of these globs (e.g. a file named `credentials` or `id_rsa`).

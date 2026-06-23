@@ -8,14 +8,14 @@
 
 ## Actor Mapping (SPEC §15.5)
 
-| source_kind           | @type               | @id                | name            |
-|-----------------------|---------------------|--------------------|-----------------|
-| human_cli             | Person              | actor:human        | Human operator  |
-| claude_hook           | SoftwareApplication | actor:claude-code  | Claude Code     |
-| skill_command         | SoftwareApplication | actor:rcr          | RO-Crate Run    |
-| materializer          | SoftwareApplication | actor:rcr          | RO-Crate Run    |
-| validator             | SoftwareApplication | actor:rcr          | RO-Crate Run    |
-| ci                    | System              | actor:ci           | CI              |
+| source_kind           | @type               | @id                  | name            |
+|-----------------------|---------------------|----------------------|-----------------|
+| human_cli             | Person              | #actor/human         | Human operator  |
+| claude_hook           | SoftwareApplication | #actor/claude-code   | Claude Code     |
+| skill_command         | SoftwareApplication | #actor/rcr           | RO-Crate Run    |
+| materializer          | SoftwareApplication | #actor/rcr           | RO-Crate Run    |
+| validator             | SoftwareApplication | #actor/rcr           | RO-Crate Run    |
+| ci                    | System              | #actor/ci            | CI              |
 
 ## File and Dataset Rules (SPEC §15.6)
 
@@ -50,16 +50,16 @@
 ## HowToStep / ControlAction / ParameterConnection (SPEC §15.10)
 
 - Each workflow step is a `HowToStep` entity with `name` and optional `position`.
-- `ControlAction` links a `CreateAction` to its `HowToStep` via `instrument`.
+- `ControlAction` links its `HowToStep` (via `instrument`) to the step execution action (via `object`).
 - `ParameterConnection` with `sourceParameter`/`targetParameter` links output params to downstream step inputs — emit only when connections are explicitly declared.
 
 ## Environment, Container, Dependency (SPEC §15.11)
 
-- Capture OS, Python version, CPU/memory as `PropertyValue` entities on the run action.
+- Allowlisted environment variables are emitted as `#env/<NAME>` `PropertyValue` entities (governed by `redaction.environment_allowlist`) and referenced from the command action via `environment`. The host OS/CPU/memory are NOT auto-snapshotted; the Python version is recorded as `softwareVersion` on the Python `SoftwareApplication` actor.
 - Container images: `ContainerImage` entity with `registry`, `name`, `tag`, and `sha256` properties.
-- Dependency lock files: `File` entities attached to the root action.
+- Dependency lock files / manifests are emitted as standalone `File` entities (with sha256 identifier and contentSize).
 
 ## Git / Source State (SPEC §15.12)
 
-- Record `commit`, `branch`, `dirty` flag, and `remote_url` as `PropertyValue` entities on the root action.
-- If working tree is dirty, note the diff path in the crate but do not include diff content unless `file_policy.include_git_diff` is true.
+- Git state is a `#git/state` entity (`@type: Thing`): the commit SHA is its `identifier`, and `branch`, `dirty`, and `remote` are `PropertyValue`s under `additionalProperty`. It is a standalone entity, not properties on an action.
+- If working tree is dirty, note the diff path in the crate but do not include diff content unless `file_policy.include_git_diff` permits it (it is a string policy, default `"private-only"`; set to `"never"` to suppress).

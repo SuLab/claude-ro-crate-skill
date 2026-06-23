@@ -221,23 +221,15 @@ Use this for a single repository:
       scripts/
         rcr
   hooks/
-    rocrate_session_start.py
-    rocrate_user_prompt.py
-    rocrate_pre_tool_use.py
-    rocrate_post_tool_use.py
-    rocrate_post_tool_failure.py
-    rocrate_post_tool_batch.py
-    rocrate_file_changed.py
-    rocrate_permission.py
-    rocrate_cwd_changed.py
-    rocrate_worktree.py
-    rocrate_task.py
-    rocrate_compact.py
-    rocrate_stop.py
-    rocrate_stop_failure.py
-    rocrate_session_end.py
+    hooks.json
+    rocrate_hook.py
+    _bootstrap.py
+  lib/
+    ro_crate_run/
   settings.json
 ```
+
+`rcr install-project` copies the single generic `rocrate_hook.py` dispatcher (every `hooks.json` entry invokes it as `rocrate_hook.py <EventName>`) and the `_bootstrap.py` import shim into `.claude/hooks/`, and vendors the `ro_crate_run` package into `.claude/lib/` so the wrappers and hooks run without a pip install.
 
 ### 6.2 Plugin distribution
 
@@ -254,8 +246,8 @@ ro-crate-run-plugin/
       scripts/
   hooks/
     hooks.json
-    rocrate_*.py
-    ...
+    rocrate_hook.py
+    _bootstrap.py
   templates/
     settings.rocrate.json
   README.md
@@ -327,7 +319,7 @@ Behavior:
 
 - Hooks capture prompts, tool activity, file edits, command activity, permission events, and failures.
 - Stop hook attempts checkpoint if stale.
-- Stop hook blocks only when materialization fails, required metadata is missing, or privacy validation fails.
+- Stop hook blocks when materialization fails, a critical structural validation error is present (journal, state, or RO-Crate levels), required metadata is missing, or privacy validation fails.
 - Raw Bash commands generate warnings unless policy marks them risky.
 
 ### 7.3 Enforced mode
@@ -438,7 +430,7 @@ It MUST be a thin dispatcher to Python modules. It MUST work when called from Cl
 ### 9.2 Commands
 
 ```text
-rcr start [TITLE] [--mode advisory|monitored|enforced] [--profile process|workflow|provenance|auto]
+rcr start [TITLE] [--mode advisory|monitored|enforced] [--profile process|workflow|provenance|auto] [--no-checkpoint]
 rcr resume
 rcr status [--json]
 rcr note TEXT [--public|--private]
@@ -447,13 +439,13 @@ rcr phase NAME [--complete-current]
 rcr phase complete [NAME]
 rcr step start STEP_ID_OR_NAME [--workflow-step ID] [--description TEXT]
 rcr step end STEP_ID_OR_NAME [--status completed|failed|skipped]
-rcr input PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--public|--private] [--copy|--reference]
-rcr output PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--public|--private] [--copy|--reference]
+rcr input PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--public|--private] [--existence VALUE] [--copy|--reference]
+rcr output PATH_OR_URI [--role ROLE] [--description TEXT] [--required] [--public|--private] [--existence VALUE] [--copy|--reference]
 rcr parameter NAME VALUE [--formal-parameter ID] [--type TYPE] [--connect-from ID] [--connect-to ID]
 rcr software COMMAND_OR_NAME [--version VERSION] [--type TYPE]
 rcr run [--step STEP] [--inputs PATHS] [--outputs PATHS] -- COMMAND [ARGS...]
 rcr checkpoint [--profile process|workflow|provenance|auto]
-rcr validate [--strict] [--json]
+rcr validate [--strict] [--json] [--public]
 rcr finalize [--zip] [--include-event-journal] [--sign] [--public|--private]
 rcr inspect [--events] [--crate] [--graph] [--html]
 rcr redact [--dry-run] [--apply] [--policy FILE]
@@ -469,6 +461,8 @@ rcr accept [TEXT]
 rcr reject [TEXT]
 rcr abort [REASON]
 ```
+
+The `rcr validate --public` flag runs the Level-5 public-export gate over the run in addition to the normal validation levels.
 
 ### 9.3 `rcr start`
 
@@ -620,10 +614,10 @@ Every hook script MUST:
 | `SessionStart` | Observe session start/resume context. | `session.started`, `run.resumed` |
 | `UserPromptSubmit` | Capture redacted prompt or prompt hash/private record. | `human.prompt` |
 | `PreToolUse` | Observe requested tool and optionally block risky raw commands. | `tool.requested`, `tool.blocked` |
-| `PostToolUse` | Capture completed tool activity, file changes, command summaries. | `tool.completed`, `execution.command.*`, `file.*` |
+| `PostToolUse` | Capture completed tool activity, file changes, command summaries. | `tool.completed`, `file.*` |
 | `PostToolUseFailure` | Capture failed tool activity. | `tool.failed` |
 | `PostToolBatch` | Record batch boundary and optionally checkpoint. | `tool.batch.completed` |
-| `Stop` | Checkpoint and validate before response completion. | `session.stop.requested`, `crate.checkpoint.*`, `crate.validation.*` |
+| `Stop` | Checkpoint and validate before response completion. | `session.stop.requested`, `crate.checkpoint.*` |
 | `SessionEnd` | Record session end and attempt non-blocking checkpoint. | `session.ended` |
 
 ### 10.3 Recommended hooks for v1.1
@@ -694,7 +688,7 @@ Every event MUST contain:
   },
   "source": {
     "kind": "claude_hook|skill_command|human_cli|materializer|validator|ci",
-    "name": "rocrate_post_tool_use.py",
+    "name": "rcr",
     "version": "..."
   },
   "visibility": "private|public|derived-public",
@@ -872,16 +866,17 @@ On startup, recovery MUST treat `events.ndjson` as authoritative over `state.jso
 
 ```json
 {
-  "schema_version": "1.0.0",
   "run_id": "run_20260617_212401_abcdef",
   "title": "Evaluate model variants on benchmark dataset",
   "description": null,
+  "session_id": null,
   "created_at": "2026-06-17T21:24:01Z",
   "updated_at": "2026-06-17T22:10:33Z",
   "sequence": 128,
   "last_event_hash": "sha256:...",
   "mode": "monitored",
   "selected_profile": "process",
+  "requested_profile": "auto",
   "profile_confidence": "high",
   "profile_uri": "https://w3id.org/ro/wfrun/process/0.5",
   "current_phase_id": "phase_preprocessing",
@@ -901,13 +896,6 @@ On startup, recovery MUST treat `events.ndjson` as authoritative over `state.jso
   "declared_outputs": [],
   "known_outputs": [],
   "known_software": [],
-  "privacy": {
-    "include_prompts": false,
-    "include_event_journal": false,
-    "include_full_logs": false,
-    "include_source_code_public": false,
-    "include_git_diff_public": false
-  },
   "warnings": [],
   "errors": []
 }
@@ -1041,10 +1029,12 @@ Default file policy:
   "include_source_code": "private-only",
   "include_git_diff": "private-only",
   "include_event_journal": false,
-  "max_file_size_mb": 100,
-  "copy_mode": "mixed"
+  "max_log_size_mb": 10,
+  "max_file_size_mb": 100
 }
 ```
+
+`copy_mode` is not part of the file policy; it is a top-level `config.json` key (a sibling of `file_policy`).
 
 Rules:
 
@@ -1240,8 +1230,8 @@ Completed `CreateAction` example:
   "startTime": "2026-06-17T21:30:00Z",
   "endTime": "2026-06-17T21:31:10Z",
   "actionStatus": {"@id": "http://schema.org/CompletedActionStatus"},
-  "agent": {"@id": "#actor/claude-code"},
-  "instrument": {"@id": "scripts/evaluate.py"},
+  "agent": {"@id": "#actor/human"},
+  "instrument": {"@id": "#software/evaluate.py"},
   "object": [{"@id": "data/input.csv"}],
   "result": [{"@id": "results/report.md"}]
 }
@@ -1427,7 +1417,7 @@ never overwritten by synthesis.
 "All Claude agent actions are the workflow" is taken literally: every captured agent
 action is projected into the crate, not merely journaled. The reducer
 (`materialize/run_model.py`) populates a `RunModel` field per family and
-`materialize/mapping.py::build_agent_actions` emits crate entities:
+`materialize/mapping/actions.py::build_agent_actions` (re-exported from `materialize/mapping/`) emits crate entities:
 
 | Agent action (journal event)                         | Crate entity |
 |------------------------------------------------------|--------------|
@@ -1665,7 +1655,6 @@ Default `.ro-crate-run/config.json`:
 
 ```json
 {
-  "schema_version": "1.0.0",
   "mode": "monitored",
   "default_profile": "process",
   "project_name": null,
@@ -1726,7 +1715,7 @@ Default `.ro-crate-run/config.json`:
     "timeout_seconds": 5,
     "fail_closed": false
   },
-  "profile_uri": ""
+  "profile_uri": "https://w3id.org/ro/wfrun/process/0.5"
 }
 ```
 
@@ -1738,7 +1727,7 @@ Default `.ro-crate-run/config.json`:
 
 - Python 3.9 or newer.
 - `rocrate` / ro-crate-py, pinned after integration testing.
-- JSON Schema or Pydantic for event validation.
+- No schema library is used for event validation: events and config are hand-serialized dataclasses, and the L0 validator checks event types against a hand-maintained vocabulary.
 - `filelock` or equivalent for cross-platform locks.
 - `rdflib` for JSON-LD expansion checks (mandatory runtime dependency).
 - Optional: `pyshacl` for SHACL profile checks.

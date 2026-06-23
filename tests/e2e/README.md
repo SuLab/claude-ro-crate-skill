@@ -7,10 +7,15 @@ suite drives `rcr`/the Python API in-process).
 
 ## How it works
 
-`harness.run_scenario` creates an isolated temp git project, seeds files, launches
-`claude -p` with `PATH=<repo>/.venv/bin:$PATH` and `CLAUDE_PROJECT_DIR=<tmp>` (so the
-skill `rcr` and hooks resolve `ro_crate_run` to the editable repo `src/` — fixes are
-live), then loads `<tmp>/.ro-crate-run/ro-crate/ro-crate-metadata.json` and runs
+`harness.run_scenario` creates an isolated temp git project, seeds files, and snapshots
+`src/ro_crate_run` into a throwaway dir (`snapshot_source()`). It launches `claude -p`
+with `PATH=<repo>/.venv/bin:$PATH`, `PYTHONPATH=<snapshot>`, and `CLAUDE_PROJECT_DIR=<tmp>`:
+the skill `rcr` and hooks import `ro_crate_run` from the snapshot (NOT the repo `src/`,
+which is never imported — a bypassPermissions agent editing repo `src/` is inert), while
+`CLAUDE_PROJECT_DIR` only places run state under the temp project. The snapshot is
+recreated from the current `src/` each run, so live fixes are picked up per-run (but via
+the per-run snapshot, not by importing `src/` directly or via `CLAUDE_PROJECT_DIR`). It
+then loads `<tmp>/.ro-crate-run/ro-crate/ro-crate-metadata.json` and runs
 `rcr validate --json` / `rcr status --json`. `assertions.assert_crate` runs the
 standard validation battery (no dangling refs, descriptor + profile conformance,
 zero validation errors, scenario-specific entity/property checks, public leak scan).

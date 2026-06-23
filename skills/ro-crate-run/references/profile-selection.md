@@ -43,8 +43,9 @@ The `workflow.profile.selected` event carries:
 
 ```json
 {
-  "profile": "provenance",
+  "selected_profile": "provenance",
   "profile_uri": "https://w3id.org/ro/wfrun/provenance/0.5",
+  "reason": "auto-selected from workflow and step evidence",
   "confidence": "high",
   "evidence": [
     {"kind": "workflow", "path": "Snakefile"},
